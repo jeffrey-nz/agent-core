@@ -137,33 +137,47 @@ export async function buildJsonToolsFollowUp({
 
     let resultStr;
     let isError = false;
-    const blocked = checkReadOnlyViolation(toolName, toolParams, toolContext);
-    if (blocked) {
-      resultStr = blocked;
-      isError = true;
-      log(colors.red(`  [BLOCKED] Read-only violation prevented: ${toolName}(${String(toolParams?.command || toolParams?.path || toolParams?.file_path || "").slice(0, 60)})`));
-    } else {
-      try {
-        const result = await executeAnyTool(toolName, toolParams, toolContext);
-        resultStr = String(result ?? "[no output]");
-        isError = resultStr.startsWith("[ERROR]");
 
-        // PRM: Diagnostics spam prevention (Lightman et al. 2023 — low-reward signal).
-        // When get_workspace_diagnostics returns SKIPPED or PASSED, append a one-time
-        // directive telling the model to finalize rather than call the tool again.
-        // Calling it again returns the same result — repeated calls are zero-reward.
-        if (
-          toolName === "get_workspace_diagnostics" &&
-          /\[DIAGNOSTICS (SKIPPED|PASSED)\]/i.test(resultStr)
-        ) {
-          resultStr +=
-            "\n\n[ACTION REQUIRED] Diagnostics check is complete — do NOT call get_workspace_diagnostics again. " +
-            "If there are remaining files to write for this subtask, write them now with write_file. " +
-            "If all required files are written, output [] to signal completion.";
-        }
-      } catch (err) {
-        resultStr = `[ERROR] ${err.message}`;
+    // Hard-block repeated no-op diagnostics calls (PRM: Lightman et al. 2023).
+    // Once diagnostics has returned SKIPPED or PASSED within this tool context,
+    // block subsequent calls immediately — the model must finalize instead.
+    if (toolName === "get_workspace_diagnostics" && toolContext?._diagNoOpSeen) {
+      resultStr =
+        "[BLOCKED] get_workspace_diagnostics already returned SKIPPED/PASSED this subtask. " +
+        "Calling it again returns the same result. " +
+        "You MUST write remaining files now with write_file, or output [] to signal completion. " +
+        "Do NOT call get_workspace_diagnostics again.";
+      isError = true;
+      log(colors.yellow(`  [Protocol] Blocked redundant get_workspace_diagnostics call (already no-op this subtask).`));
+    } else {
+      const blocked = checkReadOnlyViolation(toolName, toolParams, toolContext);
+      if (blocked) {
+        resultStr = blocked;
         isError = true;
+        log(colors.red(`  [BLOCKED] Read-only violation prevented: ${toolName}(${String(toolParams?.command || toolParams?.path || toolParams?.file_path || "").slice(0, 60)})`));
+      } else {
+        try {
+          const result = await executeAnyTool(toolName, toolParams, toolContext);
+          resultStr = String(result ?? "[no output]");
+          isError = resultStr.startsWith("[ERROR]");
+
+          // PRM: Diagnostics spam prevention (Lightman et al. 2023 — low-reward signal).
+          // When get_workspace_diagnostics returns SKIPPED or PASSED, set a flag so
+          // the next call is hard-blocked rather than softly nudged.
+          if (
+            toolName === "get_workspace_diagnostics" &&
+            /\[DIAGNOSTICS (SKIPPED|PASSED)\]/i.test(resultStr)
+          ) {
+            if (toolContext) toolContext._diagNoOpSeen = true;
+            resultStr +=
+              "\n\n[ACTION REQUIRED] Diagnostics check is complete — do NOT call get_workspace_diagnostics again. " +
+              "If there are remaining files to write for this subtask, write them now with write_file. " +
+              "If all required files are written, output [] to signal completion.";
+          }
+        } catch (err) {
+          resultStr = `[ERROR] ${err.message}`;
+          isError = true;
+        }
       }
     }
 

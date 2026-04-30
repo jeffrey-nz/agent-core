@@ -1519,6 +1519,28 @@ DEBUGGING STRATEGY:
       return { verifierFeedback: "PASS" };
     }
 
+    // If the PM explicitly planned this subtask as file-free (files: []) AND the
+    // coder called at least one execution tool, treat it as an execution-only pass.
+    // This avoids false "no files written" loops on test/verify subtasks where the
+    // PM correctly signalled that no code changes are required.
+    const subtaskMetaEarly = state.subtasks?.[state.currentSubtaskIndex];
+    const pmPlannedNoFiles =
+      Array.isArray(subtaskMetaEarly?.files) && subtaskMetaEarly.files.length === 0;
+    if (pmPlannedNoFiles && calledExecutionTool(state.lastToolsExecuted)) {
+      log(
+        colors.yellow(
+          "  [Graph] -> No files modified, PM planned files:[] and execution tool ran - auto-passing.",
+        ),
+      );
+      emitTaskCompleted(state);
+      const taskLabelEarly =
+        subtaskMetaEarly?.task || "execution-only subtask";
+      await commitVerifiedSubtask(state.projectDir, taskLabelEarly);
+      await closeSubIssueForSubtask(state);
+      writeVerificationMarker();
+      return { verifierFeedback: "PASS" };
+    }
+
     const newRetryCount = (state.coderRetryCount ?? 0) + 1;
     log(colors.red(`  [Graph] -> Verifier failed: coder wrote no files. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
     eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: no files written - nudging coder`, type: "warning" });
@@ -1639,6 +1661,50 @@ CURRENT SUBTASK:
 ${currentTask}${capWarning}`,
         },
       ],
+    };
+  }
+
+  // CSS/JSX class-name consistency gate (React/Vue projects).
+  // When a .css file was written, require the coder to explicitly confirm that
+  // every selector in the CSS matches a className used in the JSX/TSX — before
+  // the subtask can pass. Catches the common failure where the coder invents a
+  // new naming convention (e.g. BEM .square.light) that doesn't match the JSX
+  // (e.g. className="light-square"). This is checked on the FIRST pass — the
+  // coder must have run a read_file on the JSX before we can trust the CSS.
+  // CSS/JSX class-name consistency gate (React/Vue projects).
+  // When a .css file was written on the FIRST attempt (coderRetryCount === 0),
+  // require the coder to explicitly verify that every CSS selector matches a
+  // className in the JSX before the subtask can pass. Catches the common failure
+  // where the coder invents a new naming convention (e.g. .square.light) that
+  // doesn't match the JSX (e.g. className="light-square"). Only fires once per
+  // subtask to avoid consuming all retries on the consistency check alone.
+  const cssFilesWritten = (state.modifiedFiles || []).filter(f => f.endsWith('.css'));
+  if (cssFilesWritten.length > 0 && (state.coderRetryCount ?? 0) === 0) {
+    const jsxPaths = (state.modifiedFiles || []).filter(f => /\.(jsx|tsx)$/.test(f));
+    const jsxHint = jsxPaths.length > 0
+      ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
+      : `Check the JSX/TSX component that imports ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
+    log(colors.yellow(`  [Graph] -> CSS written — requiring CSS/JSX class-name consistency verification.`));
+    return {
+      verifierFeedback: "FAIL",
+      coderRetryCount: 1,
+      messages: [{
+        role: "user",
+        content: `[VERIFIER CSS CONSISTENCY CHECK]
+You wrote a CSS file (${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}). Before this subtask can pass, you MUST verify that every CSS selector matches a className actually used in the JSX.
+
+MANDATORY STEPS:
+1. Call read_file on the JSX component(s) that import this CSS.
+2. List every className string used in the JSX (e.g. className="board", className="square light-square selected-square").
+3. For each CSS class selector (.board, .square, .light-square, etc.) confirm it appears as a className in the JSX.
+4. CRITICAL: .square.light (compound selector) ≠ .light-square (single hyphenated class). JSX className="light-square" requires CSS .light-square { }, NOT .square.light { }.
+5. If ANY mismatch: fix the CSS selector (or JSX className) so they match exactly.
+6. Once verified and any fixes applied: output [] to complete.
+
+${jsxHint}
+
+Do NOT output [] without reading the JSX first.`,
+      }],
     };
   }
 

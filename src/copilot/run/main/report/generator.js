@@ -71,7 +71,11 @@ export async function generateSuccessReport({
       });
 
       const messages = [{ role: "user", content: prompt }];
-      const res = await copilot.sendTurn(messages, "report-summary");
+      const res = await copilot.sendTurn(messages, "report-summary", {
+        interactionMode: "readOnly",
+        requireWriteFile: false,
+        readOnly: true,
+      });
 
       if (res?.ok && res.text?.trim()) {
         summaryText = res.text
