@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { streamText } from "ai";
 import { getMcpBoundTools } from "../../tools/sdkRegistry.js";
 import { loadProjectContextFiles } from "../../../utils/contextLoader.js";
@@ -8,6 +10,26 @@ import { colors } from "#app/ui/colors.js";
 import { personaMeta } from "../personas.js";
 import { MAX_STEPS_RESEARCHER, MAX_STEPS_RESEARCHER_DOC } from "#config/pipeline.js";
 import { updateCheckpointState } from "../checkpointBridge.js";
+
+// Directories that don't count as "code files" when checking for empty workspace.
+const EMPTY_WORKSPACE_IGNORED = new Set([
+  ".git", ".backup", ".hg", ".svn",
+  "node_modules", "vendor", ".venv", "venv", "__pycache__",
+  ".next", "dist", "build", "out", ".cache",
+]);
+
+function workspaceHasCodeFiles(dir, depth = 0) {
+  if (depth > 3) return false;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (EMPTY_WORKSPACE_IGNORED.has(entry.name)) continue;
+      if (entry.isFile()) return true;
+      if (entry.isDirectory() && workspaceHasCodeFiles(path.join(dir, entry.name), depth + 1)) return true;
+    }
+  } catch { /* unreadable dir — don't count as empty */ return true; }
+  return false;
+}
 
 const PERSONA = personaMeta("researcher");
 
@@ -62,6 +84,23 @@ export async function researcherNode(state, config) {
   // content directly - not a code investigation report. A separate minimal
   // writer node (directWriterNode) then saves the output to disk.
   const isDocumentationTask = state.taskType === "documentation";
+
+  // Empty workspace fast-path: if the project directory has no code files,
+  // skip the entire AI research phase. On a new/empty project the researcher
+  // would waste several minutes doing find_file calls that return nothing.
+  if (!isDocumentationTask && !workspaceHasCodeFiles(state.projectDir)) {
+    log(colors.yellow("  [Graph] -> Empty workspace detected — skipping researcher AI phase."));
+    const projectType = projectCtx.projectType;
+    updateCheckpointState({ projectType, projectConstraints: mergedConstraints });
+    return {
+      researchContext: "",
+      researchSummary: "[NEW EMPTY PROJECT — no existing code to research. Coder should create all files from scratch.]",
+      originalError: "",
+      projectType,
+      projectConstraints: mergedConstraints,
+      currentPersona: PERSONA.id,
+    };
+  }
 
   // For documentation tasks, use the original unscoped prompt as the content
   // source - it contains the actual notes/issues the user wants documented.
