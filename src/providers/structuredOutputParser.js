@@ -85,6 +85,16 @@ export class StructuredOutputParser {
     const toolCalls = [];
     if (!text) return { success: false, actions: [], error: "No text to parse" };
 
+    // Strategy 0: empty-array "done" signal.
+    // Models signal completion by outputting [] (bare or in a code block).
+    // All extraction strategies below only return success when toolCalls.length > 0,
+    // so a correct [] response would fall through and trigger a spurious parse error.
+    // Only apply when no JSON tool-call object is present, to avoid false positives.
+    const hasToolCallObject = /"tool"\s*:/.test(text) || /"name"\s*:/.test(text);
+    if (!hasToolCallObject && /\[\s*\]/.test(text)) {
+      return { success: true, actions: [], error: null };
+    }
+
     // Strategy 1: first "[{" to last "]"
     let startIdx = -1;
     let searchFrom = 0;

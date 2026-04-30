@@ -204,6 +204,7 @@ export async function runAutomationAgentLoop({
 
         // Choose a hint that matches what actually went wrong.
         const rawText = String(state.responseText || "");
+        const isReadOnly = state.toolContext?.readOnly;
         const looksLikeCode =
           !rawText.includes("{") ||
           rawText.trimStart().startsWith("//") ||
@@ -212,7 +213,13 @@ export async function runAutomationAgentLoop({
           rawText.trimStart().startsWith("public ") ||
           rawText.trimStart().startsWith("class ");
 
-        const hint = looksLikeCode
+        const hint = isReadOnly
+          ? `You are in a read-only research/scoping phase. If you have finished exploring, respond with an empty array:\n` +
+            `\`\`\`json\n[]\n\`\`\`\n\n` +
+            `If you still have more files to read, respond with a JSON array of read-only tool calls:\n` +
+            `\`\`\`json\n[\n  { "tool": "read_file", "path": "/abs/path/to/file.js" }\n]\n\`\`\`\n\n` +
+            `Do NOT output prose — use \`\`\`json\n[]\n\`\`\` if done.`
+          : looksLikeCode
           ? `Your response appears to be raw code or plain text rather than a JSON tool call array.\n\n` +
             `You MUST respond with a JSON array of tool objects, not raw code. Example:\n` +
             `[\n  { "tool": "write_file", "path": "/abs/path/to/file.cs", "content": "..." }\n]\n\n` +
