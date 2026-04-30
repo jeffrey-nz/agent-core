@@ -147,6 +147,20 @@ export async function buildJsonToolsFollowUp({
         const result = await executeAnyTool(toolName, toolParams, toolContext);
         resultStr = String(result ?? "[no output]");
         isError = resultStr.startsWith("[ERROR]");
+
+        // PRM: Diagnostics spam prevention (Lightman et al. 2023 — low-reward signal).
+        // When get_workspace_diagnostics returns SKIPPED or PASSED, append a one-time
+        // directive telling the model to finalize rather than call the tool again.
+        // Calling it again returns the same result — repeated calls are zero-reward.
+        if (
+          toolName === "get_workspace_diagnostics" &&
+          /\[DIAGNOSTICS (SKIPPED|PASSED)\]/i.test(resultStr)
+        ) {
+          resultStr +=
+            "\n\n[ACTION REQUIRED] Diagnostics check is complete — do NOT call get_workspace_diagnostics again. " +
+            "If there are remaining files to write for this subtask, write them now with write_file. " +
+            "If all required files are written, output [] to signal completion.";
+        }
       } catch (err) {
         resultStr = `[ERROR] ${err.message}`;
         isError = true;

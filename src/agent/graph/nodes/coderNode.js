@@ -11,7 +11,7 @@ import { classifyEnvironmentError } from "#agent/utils/executionOutputAnalysis.j
 import { MAX_STEPS_CODER, MAX_STEPS_CODER_UNITY } from "#config/pipeline.js";
 import { buildCoderDirective, getCoderMaxSteps, buildAcceptanceTestDirective } from "#utils/projectDirectives.js";
 import { resolveProjectUrl } from "#copilot/run/main/applyFilesPhase/validators/resolveProjectUrl.js";
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import path from "node:path";
 
 const PERSONA = personaMeta("coder");
@@ -218,6 +218,22 @@ export async function coderNode(state, config) {
 
   const diagnosticsInstruction = state.model
     ? `- CRITICAL VERIFICATION: Before you finish this subtask, you MUST run the 'get_workspace_diagnostics' tool to verify you have not introduced syntax or compilation errors.\n`
+    : "";
+
+  // Constitutional AI: React scaffold hazard — detect when writing React/JSX/TSX files
+  // into a project with no package.json, which makes the app unable to run or test.
+  // The verifier skips test validation when package.json is absent → false PASS.
+  const taskAndFiles = `${currentTask} ${(currentSubtask?.files || []).join(" ")} ${currentSubtask?.implementationNote || ""}`;
+  const isReactTask = /\.(jsx|tsx)$|react|vite/i.test(taskAndFiles);
+  const scaffoldHazard = isReactTask
+    ? await access(path.join(state.projectDir, "package.json")).then(() => false).catch(() => true)
+    : false;
+  const reactScaffoldWarning = scaffoldHazard
+    ? `\n⚠️ REACT SCAFFOLD HAZARD — package.json IS MISSING\n` +
+      `Writing .jsx files without package.json means the app cannot run and Vitest cannot execute, ` +
+      `causing a false PASS from the verifier (test validation is skipped when package.json is absent).\n` +
+      `You MUST create package.json, vite.config.js, index.html, and src/main.jsx IN THIS RESPONSE ` +
+      `alongside any other files for this subtask. Include all of them in a single write_file array.\n`
     : "";
 
   // Build the subtask block - includes planned file list, line range, implementation
@@ -559,7 +575,7 @@ ${constraintsSection}
 ${state.executionPlan}
 ${progressNote}${allModifiedFilesNote}
 [YOUR CURRENT SUBTASK]
-${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${hazardSection}${testContractBlock}
+${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${hazardSection}${reactScaffoldWarning}${testContractBlock}
 ${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
 Instructions:
 - [TOOL PLANNING PROTOCOL] At the very start of your response, output a brief intent block:\n<tool-plan>\nGoal: <one line — what this subtask achieves>\nSteps: <3-5 tool names in the order you plan to call them, comma-separated>\n</tool-plan>\nThen immediately proceed with the tool calls.

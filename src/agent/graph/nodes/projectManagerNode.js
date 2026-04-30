@@ -348,6 +348,14 @@ SWIFT PROJECT ATOMICITY RULES (apply when generating subtasks for Swift/iOS proj
 - @Observable MIGRATION MUST BE ONE SUBTASK: If any subtask migrates a class from ObservableObject to @Observable (adds @Observable macro, removes ObservableObject conformance, removes @Published), ALL consuming views MUST be updated in the SAME subtask — not in subsequent subtasks. The patch validator runs swiftc -typecheck after every single tool call; migrating the ViewModel first produces a compile error (consuming views still use @StateObject) that rolls back the ViewModel change before the view updates can run. The coder can NEVER "get there in steps". Combine ViewModel + ALL owner views (@StateObject→@State) + ALL receiver views (@ObservedObject→@Bindable) into ONE subtask with a single "files" array containing ALL affected files.
 - UIKit REMOVAL MUST BE ONE SUBTASK: If a subtask removes "import UIKit", ALL UIKit-dependent API replacements (Color(.systemBackground), UIPasteboard, UINotificationFeedbackGenerator, UIApplication, UIActivityViewController) MUST be in the SAME subtask and the same write_file call. Removing the import alone reveals the API errors; the validator rolls back the patch.
 
+FRESH PROJECT SCAFFOLDING (CRITICAL — without this, the app can never run):
+When the Research Report indicates the workspace is empty or contains no package.json, index.html, vite.config.js, or framework config files, you MUST include a SCAFFOLD subtask as the FIRST subtask before any source file subtasks. This scaffold subtask must create ALL of the following in one write_file batch:
+  • package.json (with correct dependencies: react, react-dom, vite, @vitejs/plugin-react, vitest for React/Vite projects)
+  • vite.config.js (configured for React with vitest test environment)
+  • index.html (the HTML entry point with <div id="root">)
+  • src/main.jsx (the React entry point that renders <App /> into #root)
+Without a scaffold subtask, source files like App.jsx are written into a dead project that has no package.json, no dev server, and cannot run vitest for tests. The verifier falsely passes because test validation is skipped when package.json is absent.
+
 REVIEW-ONLY PLAN PROHIBITION (CRITICAL — prevents sessions that produce zero code changes):
 The projectManager RUNS ONCE and its plan is FINAL. There is NO second planning pass after REVIEW subtasks complete.
 - NEVER generate a plan that consists entirely of REVIEW subtasks with no implementation subtasks — this produces zero file changes and wastes the entire session.

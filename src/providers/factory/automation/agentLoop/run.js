@@ -45,6 +45,15 @@ export async function runAutomationAgentLoop({
   let consecutiveReadLoop = 0;
   const MAX_READ_LOOP_NUDGES = 2;
 
+  // ── Diagnostics Spam Detection ────────────────────────────────────────────
+  // PRM signal: get_workspace_diagnostics returning SKIPPED or PASSED and being
+  // called again immediately is a zero-reward action. The model sees "SKIPPED"
+  // (no project config found) and calls the tool again hoping the result changes.
+  // After 2 consecutive no-op diagnostics calls, inject an exit nudge so the
+  // model finalizes the subtask instead of looping.
+  let consecutiveDiagnosticsNoOp = 0;
+  const MAX_DIAGNOSTICS_NOOP = 2;
+
   // ── Read-Only Write-Block Loop Detection ─────────────────────────────────
   // In read-only mode (researcher/scoper), the agent sometimes gets stuck
   // repeatedly trying to call write_file to "complete" its work. Each attempt
@@ -528,6 +537,49 @@ export async function runAutomationAgentLoop({
       }
 
       await executeStep(state, parsed, step);
+
+      // ── Diagnostics Spam Nudge (check AFTER executeStep) ──────────────────
+      // After running the step, check if the last tool call was get_workspace_diagnostics
+      // and the result was SKIPPED or PASSED (a no-op). If so, nudge the model to move on.
+      if (state.requireWriteFile && !state.requireTools) {
+        const hasDiagnosticsCall = parsed.jsonToolCalls.some(
+          (tc) => (tc.tool || tc.name || "").toLowerCase() === "get_workspace_diagnostics"
+        );
+        if (hasDiagnosticsCall) {
+          const lastResult = state.lastToolResults?.find?.(
+            (r) => /DIAGNOSTICS (SKIPPED|PASSED)/i.test(r || "")
+          ) || (typeof state.lastToolResult === "string" && /DIAGNOSTICS (SKIPPED|PASSED)/i.test(state.lastToolResult) ? state.lastToolResult : null);
+
+          // Check via the response text that came back — it will contain the SKIPPED/PASSED message
+          const responseHasNoOp = /DIAGNOSTICS (SKIPPED|PASSED)/i.test(state.responseText || "");
+          if (responseHasNoOp || lastResult) {
+            consecutiveDiagnosticsNoOp++;
+            if (consecutiveDiagnosticsNoOp >= MAX_DIAGNOSTICS_NOOP) {
+              consecutiveDiagnosticsNoOp = 0;
+              log(colors.yellow(
+                `  [Protocol] ${state.label}: diagnostics returned SKIPPED/PASSED ${MAX_DIAGNOSTICS_NOOP}+ times — injecting finalize nudge.`,
+              ));
+              state.responseText = await state.send(
+                state.remoteSessionId,
+                `[DIAGNOSTICS COMPLETE — FINALIZE NOW]\n\n` +
+                  `get_workspace_diagnostics has already confirmed no errors. ` +
+                  `Calling it again will return the same result.\n\n` +
+                  `You MUST finalize this subtask now:\n` +
+                  `1. If there are more files to write for this subtask, write them immediately with write_file.\n` +
+                  `2. If all files have been written, output [] to signal subtask completion.\n\n` +
+                  `Do NOT call get_workspace_diagnostics again.`,
+                `${state.label} [diagnostics-finalize]`,
+              );
+              state.consecutiveNoActivity = 0;
+              continue;
+            }
+          } else {
+            consecutiveDiagnosticsNoOp = 0;
+          }
+        } else {
+          consecutiveDiagnosticsNoOp = 0;
+        }
+      }
 
       // ── Read-loop nudge (check AFTER executeStep) ─────────────────────────
       // If a file has been read 3+ times without a write, inject a targeted

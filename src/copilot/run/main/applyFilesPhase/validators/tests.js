@@ -23,6 +23,17 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles }) {
     }
   }
 
+  if (jsTestFiles.length > 0 && !(await fileExists(path.join(projectDir, "package.json")))) {
+    // Fail loudly rather than silently skipping — a "passing" verifier with no
+    // package.json means the tests never ran and the result is a false positive.
+    errors.push(
+      `JS/TS Test Failure: package.json is missing — tests cannot run without it.\n\n` +
+      `The coder wrote test files but did not create the project scaffold. ` +
+      `You MUST create package.json with the correct dependencies (react, react-dom, vite, ` +
+      `@vitejs/plugin-react, vitest, @testing-library/react if needed) so that Vitest can be installed and run.`
+    );
+  }
+
   if (
     jsTestFiles.length > 0 &&
     (await fileExists(path.join(projectDir, "package.json")))
