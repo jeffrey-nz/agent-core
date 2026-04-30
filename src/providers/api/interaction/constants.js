@@ -1,0 +1,2 @@
+export const SLOW_WARN_THRESHOLD_MS = 60000;
+export const SLOW_WARN_INTERVAL_MS = 30000;

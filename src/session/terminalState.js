@@ -1,0 +1,12 @@
+export const TERMINAL_STATES = {
+  PASS: "PASS",
+  PASS_WITH_KNOWN_FAILURES: "PASS_WITH_KNOWN_FAILURES",
+  BLOCKED: "BLOCKED",
+  ENVIRONMENT_LIMIT: "ENVIRONMENT_LIMIT",
+  FAIL: "FAIL",
+  RECURSION_ABORT: "RECURSION_ABORT",
+};
+
+export function isTerminal(state) {
+  return Object.values(TERMINAL_STATES).includes(state);
+}
