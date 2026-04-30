@@ -251,6 +251,9 @@ CRITICAL RULES:
 - "implementation_note" is MANDATORY - a coder reading only this note must know exactly what to write
 - Subtasks must result in concrete file changes only; keep them small and isolated
 
+NEW PROJECT SCAFFOLD ORDERING (CRITICAL for Node.js/React/Vite projects):
+If the task creates a new project from scratch, the FIRST subtask MUST write both .gitignore and README.md (they belong in the same scaffold subtask with package.json). The .gitignore MUST list node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. The README.md MUST include: project name, one-line description, and commands: npm install, npm run dev, npm run build, npm test. NEVER add fake entries (keys starting with "#") to package.json dependencies — the verifier will reject them.
+
 BYTE-SIZED SUBTASK RULES (CRITICAL — enforced by the pipeline):
 - Each implementation subtask MUST touch at most 3 files. If a change requires more, split it into multiple subtasks.
 - Prefer 6–12 subtasks for a medium feature. More subtasks = better visibility, easier resume, less hallucination.

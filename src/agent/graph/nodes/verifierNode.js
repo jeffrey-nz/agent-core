@@ -263,6 +263,55 @@ async function generateReflexionLesson(state) {
   }
 }
 
+// Checks that a new Node.js/React project has the mandatory setup files in place.
+// Fired whenever package.json is among the files written in a subtask.
+// Returns an array of error strings (empty = all good).
+async function checkProjectSetup(projectDir) {
+  const errors = [];
+
+  // .gitignore must exist and contain node_modules
+  const gitignorePath = path.join(projectDir, ".gitignore");
+  try {
+    const content = await fs.promises.readFile(gitignorePath, "utf8");
+    if (!content.includes("node_modules")) {
+      errors.push(
+        ".gitignore exists but does NOT contain 'node_modules'. " +
+          "Tracking node_modules in git is unacceptable (4,000+ files). " +
+          "Add node_modules/ to .gitignore NOW.",
+      );
+    }
+  } catch {
+    errors.push(
+      ".gitignore is MISSING. A new Node.js/React project MUST have a .gitignore " +
+        "that includes at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. " +
+        "Create it NOW before proceeding.",
+    );
+  }
+
+  // package.json must not have fake deps (keys starting with "#")
+  try {
+    const pkg = JSON.parse(
+      await fs.promises.readFile(path.join(projectDir, "package.json"), "utf8"),
+    );
+    const allKeys = [
+      ...Object.keys(pkg.dependencies || {}),
+      ...Object.keys(pkg.devDependencies || {}),
+    ];
+    const fakes = allKeys.filter((k) => k.startsWith("#"));
+    if (fakes.length > 0) {
+      errors.push(
+        `package.json contains FAKE dependency entries: ${fakes.join(", ")}. ` +
+          "These are NOT valid npm packages. Remove them immediately. " +
+          "Never use package.json to track task completion or pipeline state.",
+      );
+    }
+  } catch {
+    /* JSON parse errors are caught by the syntax validator */
+  }
+
+  return errors;
+}
+
 async function _verifierImpl(state) {
   // Adaptive retry budget: investigation subtasks get 2 retries, implementation subtasks
   // get 3-7 based on file count. Falls back to MAX_VERIFIER_RETRIES for unknown types.
@@ -1539,6 +1588,31 @@ DEBUGGING STRATEGY:
       await closeSubIssueForSubtask(state);
       writeVerificationMarker();
       return { verifierFeedback: "PASS" };
+    }
+
+    // Project setup gate: fires when package.json was written this subtask.
+    // Ensures .gitignore (with node_modules) exists and package.json has no
+    // fake "#key" entries. Catches the two most common new-project setup failures.
+    const pkgJsonWritten = (state.modifiedFiles || []).some(
+      (f) => path.basename(f) === "package.json",
+    );
+    if (pkgJsonWritten && state.projectDir) {
+      const setupErrors = await checkProjectSetup(state.projectDir);
+      if (setupErrors.length > 0) {
+        const newRetry = (state.coderRetryCount ?? 0) + 1;
+        log(colors.red(`  [Graph] -> Project setup gate FAILED. Retry ${newRetry}/${effectiveMaxRetries}.`));
+        eventBus.emit("system_message", { text: "✗ Project setup check failed — missing .gitignore or fake deps", type: "warning" });
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetry,
+          messages: [
+            {
+              role: "user",
+              content: `[VERIFIER PROJECT SETUP GATE]\n\n${setupErrors.join("\n\n")}\n\nFix ALL of the above before this subtask can pass.`,
+            },
+          ],
+        };
+      }
     }
 
     const newRetryCount = (state.coderRetryCount ?? 0) + 1;
