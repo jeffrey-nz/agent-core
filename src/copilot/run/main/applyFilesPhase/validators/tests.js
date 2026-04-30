@@ -27,6 +27,20 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles }) {
     jsTestFiles.length > 0 &&
     (await fileExists(path.join(projectDir, "package.json")))
   ) {
+    // Ensure dependencies are installed before running tests. For brand-new
+    // projects the coder may write package.json + source files in one subtask
+    // but skip the npm install step — the tests would always fail without this.
+    const nodeModulesExists = await fileExists(path.join(projectDir, "node_modules"));
+    if (!nodeModulesExists) {
+      log(colors.dim("  [Verifier] node_modules missing — running npm install..."));
+      const installRes = await execAsync("npm install", { cwd: projectDir });
+      if (installRes.status !== 0) {
+        errors.push(`npm install failed:\n${installRes.stdout || installRes.stderr}`);
+        return errors;
+      }
+      log(colors.green("  [Verifier] npm install succeeded."));
+    }
+
     log(colors.dim("  [Verifier] Running JS/TS tests..."));
 
     const res = await execAsync(

@@ -124,6 +124,9 @@ export async function runAutomationAgentLoop({
     // isWritePhase(PLAN) === false, so the main recovery block below never fires
     // for the initial coder response. If the model outputs <tool-plan> with no JSON
     // array in PLAN phase, the loop spins silently until maxSteps. Catch it here.
+    // Also catches [] (empty "done" signal) and plain prose — the model outputting
+    // [] in PLAN phase means it thinks the work is already done (due to accumulated
+    // chat history). Force it to start writing immediately.
     if (
       state.phase === SESSION_PHASES.PLAN &&
       state.requireWriteFile &&
@@ -156,9 +159,43 @@ export async function runAutomationAgentLoop({
             `Your <tool-plan> block was received and logged, but you did NOT follow it with any JSON tool calls.\n` +
             `The plan has NOT been executed — no files were read or written.\n\n` +
             `Continue IMMEDIATELY with the JSON tool call array that executes the first steps of your plan.\n` +
-            `Do NOT repeat the <tool-plan> tag. Output only the tool calls:\n` +
-            `[\n  { "tool": "patch_file", "path": "/abs/path/to/file.swift", ... }\n]`,
+            `Do NOT repeat the <tool-plan> tag. Output only the tool calls (use real paths under ${state.rootDir}):\n` +
+            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]`,
           `${state.label} [toolplan-recovery ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
+        );
+        state.consecutiveNoActivity = 0;
+        continue;
+      } else if (!parsed.parseError) {
+        // Got [] (empty done-signal) or plain prose with no plan tag.
+        // This usually means accumulated chat history made the model think the
+        // current subtask is already finished. Force it to begin writing.
+        consecutiveToolPlan++;
+
+        if (consecutiveToolPlan >= MAX_TOOL_PLAN_RETRIES) {
+          log(
+            colors.red(
+              `\n[Automation API] ${state.label}: no tool calls after ${MAX_TOOL_PLAN_RETRIES} recovery attempts (PLAN phase) — aborting.`,
+            ),
+          );
+          state.aborted = true;
+          break;
+        }
+
+        log(
+          colors.yellow(
+            `  [Protocol] ${state.label}: PLAN phase returned no tool calls (empty or prose) — forcing subtask start (${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}).`,
+          ),
+        );
+
+        state.responseText = await state.send(
+          state.remoteSessionId,
+          `[SUBTASK START REQUIRED — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
+            `Your response contained no tool calls. The current subtask has NOT been started yet — no files have been written.\n\n` +
+            `You MUST call write_file or patch_file NOW to begin implementing the subtask.\n` +
+            `Use the REAL file path under ${state.rootDir}:\n` +
+            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
+            `Replace "src/filename.js" with the actual file you need to create. Do NOT output [] or prose.`,
+          `${state.label} [subtask-start ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
         );
         state.consecutiveNoActivity = 0;
         continue;
@@ -217,12 +254,13 @@ export async function runAutomationAgentLoop({
           ? `You are in a read-only research/scoping phase. If you have finished exploring, respond with an empty array:\n` +
             `\`\`\`json\n[]\n\`\`\`\n\n` +
             `If you still have more files to read, respond with a JSON array of read-only tool calls:\n` +
-            `\`\`\`json\n[\n  { "tool": "read_file", "path": "/abs/path/to/file.js" }\n]\n\`\`\`\n\n` +
+            `\`\`\`json\n[\n  { "tool": "read_file", "path": "${state.rootDir}/src/filename.js" }\n]\n\`\`\`\n\n` +
             `Do NOT output prose — use \`\`\`json\n[]\n\`\`\` if done.`
           : looksLikeCode
           ? `Your response appears to be raw code or plain text rather than a JSON tool call array.\n\n` +
-            `You MUST respond with a JSON array of tool objects, not raw code. Example:\n` +
-            `[\n  { "tool": "write_file", "path": "/abs/path/to/file.cs", "content": "..." }\n]\n\n` +
+            `You MUST respond with a JSON array of tool objects, not raw code.\n` +
+            `Use a REAL path under ${state.rootDir}. Example:\n` +
+            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
             `Put the actual file content inside the "content" string — do not write it out directly.`
           : `This is most commonly caused by unescaped double quotes inside a string value. ` +
             `All " characters inside a JSON string must be written as \\". ` +
@@ -274,8 +312,8 @@ export async function runAutomationAgentLoop({
               `Your <tool-plan> block was received and logged, but you did NOT follow it with any JSON tool calls.\n` +
               `The plan has NOT been executed — no files were read or written.\n\n` +
               `Continue IMMEDIATELY with the JSON tool call array that executes the first steps of your plan.\n` +
-              `Do NOT repeat the <tool-plan> tag. Output only the tool calls:\n` +
-              `[\n  { "tool": "patch_file", "path": "/abs/path/to/file.swift", ... }\n]`,
+              `Do NOT repeat the <tool-plan> tag. Use real paths under ${state.rootDir}:\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]`,
             `${state.label} [toolplan-recovery ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
           );
           state.consecutiveNoActivity = 0;
@@ -330,8 +368,9 @@ export async function runAutomationAgentLoop({
             `[WRITE_FILE REQUIRED — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
               `Your previous response contained file content as prose text (markdown code blocks or raw code). ` +
               `This is a pipeline failure — prose is DISCARDED and no file was written to disk.\n\n` +
-              `You MUST call write_file or patch_file with the file content as the "content" argument. Example:\n` +
-              `[\n  { "tool": "write_file", "path": "/abs/path/to/file.cs", "content": "using UnityEngine;\\n..." }\n]\n\n` +
+              `You MUST call write_file or patch_file with the file content as the "content" argument.\n` +
+              `Use the REAL path of the file you want to create (under ${state.rootDir}):\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
               `Do NOT explain. Output ONLY the JSON tool call array.`,
             `${state.label} [prose-recovery ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
           );
@@ -414,6 +453,77 @@ export async function runAutomationAgentLoop({
           continue;
         } else {
           consecutiveBlockedWrites = 0;
+        }
+      }
+
+      // ── Wrong-tool detection in coder mode (BEFORE executeStep) ──────────────
+      // In requireWriteFile (coder) mode, all tool calls should eventually be
+      // write_file/patch_file. If the model uses unrecognized tools like
+      // docs_write_page or message instead, redirect it immediately.
+      if (state.requireWriteFile && !state.requireTools && !state.madeProgress) {
+        const VALID_CODER_TOOLS = new Set([
+          "write_file", "patch_file", "apply_diff", "delete_file", "move_file",
+          "read_file", "list_dir", "find_file", "grep", "search_files", "outline_file",
+          "execute_bash", "run_sake", "run_composer", "http_request",
+        ]);
+        const unknownTools = parsed.jsonToolCalls
+          .map((tc) => (tc.tool || tc.name || "").toLowerCase())
+          .filter((n) => n && !VALID_CODER_TOOLS.has(n));
+        if (unknownTools.length > 0 && unknownTools.length === parsed.jsonToolCalls.length) {
+          consecutiveProse++;
+          if (consecutiveProse >= MAX_PROSE_RETRIES) {
+            log(colors.red(`\n[Automation API] ${state.label}: wrong tools used ${MAX_PROSE_RETRIES} times — aborting.`));
+            state.aborted = true;
+            break;
+          }
+          log(colors.yellow(`  [Protocol] ${state.label}: coder used wrong tools (${unknownTools.join(", ")}) — redirecting to write_file (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
+          state.responseText = await state.send(
+            state.remoteSessionId,
+            `[WRONG TOOL — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
+              `You called "${unknownTools.join('", "')}" which is not a valid coder tool. ` +
+              `This is a code-writing phase — you MUST use write_file or patch_file to create or modify source files.\n\n` +
+              `Use the REAL path of the file you need to create/modify (under ${state.rootDir}):\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
+              `Do NOT use documentation or messaging tools. Write the actual source code files.`,
+            `${state.label} [wrong-tool ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
+          );
+          state.consecutiveNoActivity = 0;
+          continue;
+        }
+      }
+
+      // ── Placeholder-path detection (BEFORE executeStep) ─────────────────────
+      // If the model copies the example path from a recovery hint (e.g. /abs/path)
+      // instead of using the real project path, intercept it here and inject a
+      // correction rather than executing then blocking at the dispatcher level.
+      {
+        const PLACEHOLDER_RE = /^\/abs\//;
+        const allPlaceholder =
+          parsed.jsonToolCalls.length > 0 &&
+          parsed.jsonToolCalls.every((tc) => {
+            const p = tc.path || tc.args?.path || tc.input?.path || "";
+            return PLACEHOLDER_RE.test(p);
+          });
+        if (allPlaceholder) {
+          consecutiveProse++;
+          if (consecutiveProse >= MAX_PROSE_RETRIES) {
+            log(colors.red(`\n[Automation API] ${state.label}: placeholder paths repeated ${MAX_PROSE_RETRIES} times — aborting.`));
+            state.aborted = true;
+            break;
+          }
+          log(colors.yellow(`  [Protocol] ${state.label}: all tool calls use placeholder /abs/ path — injecting correction (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
+          state.responseText = await state.send(
+            state.remoteSessionId,
+            `[WRONG PATH — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
+              `You used "/abs/path/..." which is a documentation placeholder, not a real file path.\n` +
+              `The actual project is at: ${state.rootDir}\n\n` +
+              `Replace the path with a real file path under ${state.rootDir}, for example:\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/Calculator.jsx", "content": "..." }\n]\n\n` +
+              `Do NOT use /abs/path. Use the real project path shown above.`,
+            `${state.label} [placeholder-path ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
+          );
+          state.consecutiveNoActivity = 0;
+          continue;
         }
       }
 

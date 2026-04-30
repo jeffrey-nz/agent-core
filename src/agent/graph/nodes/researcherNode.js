@@ -11,11 +11,25 @@ import { personaMeta } from "../personas.js";
 import { MAX_STEPS_RESEARCHER, MAX_STEPS_RESEARCHER_DOC } from "#config/pipeline.js";
 import { updateCheckpointState } from "../checkpointBridge.js";
 
-// Directories that don't count as "code files" when checking for empty workspace.
+// Directories that never contain user code — skip when checking for empty workspace.
 const EMPTY_WORKSPACE_IGNORED = new Set([
   ".git", ".backup", ".hg", ".svn",
   "node_modules", "vendor", ".venv", "venv", "__pycache__",
   ".next", "dist", "build", "out", ".cache",
+  "docs", ".claude",
+]);
+
+// Extensions that count as "code files". Markdown, YAML config-only projects, and
+// framework-generated docs don't count — we only want files the user actually wrote.
+const CODE_EXTENSIONS = new Set([
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+  ".py", ".rb", ".go", ".java", ".cs", ".cpp", ".c", ".h",
+  ".rs", ".swift", ".kt", ".scala", ".php", ".lua", ".r",
+  ".html", ".css", ".scss", ".sass", ".less",
+  ".vue", ".svelte", ".astro",
+  ".sh", ".bash", ".zsh", ".fish",
+  ".json", ".toml", ".yaml", ".yml", ".xml",
+  ".sql", ".graphql",
 ]);
 
 function workspaceHasCodeFiles(dir, depth = 0) {
@@ -24,7 +38,10 @@ function workspaceHasCodeFiles(dir, depth = 0) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (EMPTY_WORKSPACE_IGNORED.has(entry.name)) continue;
-      if (entry.isFile()) return true;
+      if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (CODE_EXTENSIONS.has(ext)) return true;
+      }
       if (entry.isDirectory() && workspaceHasCodeFiles(path.join(dir, entry.name), depth + 1)) return true;
     }
   } catch { /* unreadable dir — don't count as empty */ return true; }
