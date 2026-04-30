@@ -32,6 +32,7 @@
     "#utils/*": "./src/utils/*",
     "#verification/*": "./src/verification/*",
     "#web/*": "./src/web/*",
+    "#ws/*": "./src/ws/*",
     "#app/ui/*": "./src/ui/*"
   },
   "dependencies": {

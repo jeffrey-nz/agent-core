@@ -9,7 +9,7 @@ import { broadcast } from "../ws/connections.js";
 import { saveRun, updateRun } from "#benchmark/store.js";
 import { evaluateScenario } from "#benchmark/evaluate.js";
 import { dashboardState } from "#app/ui/dashboard.js";
-import { isLoopIdle } from "../app/runApp/webModeLoop.js";
+import { isLoopIdle } from "#web/loopMode.js";
 
 const execFileAsync = promisify(execFile);
 

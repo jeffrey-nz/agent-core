@@ -101,3 +101,7 @@ export const setAutoProjectConfig = (cfg) => { _autoProjectConfig = cfg; };
 let _pmInstructions = "";
 export const getPMInstructions = () => _pmInstructions;
 export const setPMInstructions = (v) => { _pmInstructions = typeof v === "string" ? v.trim() : ""; };
+
+let _loopIsIdle = false;
+export const isLoopIdle = () => _loopIsIdle;
+export const setLoopIdle = (v) => { _loopIsIdle = !!v; };
