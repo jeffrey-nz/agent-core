@@ -405,7 +405,7 @@ export function buildTddDirective(projectType) {
 
 const UNITY_TDD_DIRECTIVE = `IMPORTANT: This is a Unity project. Do NOT mandate writing unit test files first and do NOT create subtasks whose primary output is a test file. Unity tests require the Unity Test Runner inside the Unity Editor and cannot be run from the CLI or batchmode. Only include test subtasks if the original user task explicitly requests Edit Mode or Play Mode tests.`;
 
-const NODE_TDD_DIRECTIVE = `You are encouraged to apply TDD where natural. For JS/TS projects, writing a failing test first is appropriate. For other project types, only add test subtasks if the task explicitly requires them.`;
+const NODE_TDD_DIRECTIVE = `You are encouraged to apply TDD where natural. For JS/TS projects, writing a failing test first is appropriate — BUT ONLY if the source module it imports already exists. If both the source module AND the test file are being created as part of this plan, the source module subtask MUST come first. NEVER create a test subtask that imports a not-yet-existing module before the module creation subtask. For other project types, only add test subtasks if the task explicitly requires them.`;
 
 const GENERIC_TDD_DIRECTIVE = `Only add test subtasks if the task explicitly requires them. Do not force TDD for non-JS/TS projects.`;
 
@@ -459,6 +459,20 @@ Source reverts alone do NOT clear poisoned compiled caches — bad data was writ
    Node.js:          execute_bash("rm -rf node_modules/.cache .next/cache .vite/cache 2>/dev/null; echo done")
    .NET:             execute_bash("find . \\\\( -name 'obj' -o -name 'bin' \\\\) -exec rm -rf {} + 2>/dev/null; echo done")
    Python:           execute_bash("find . -name '__pycache__' -exec rm -rf {} + 2>/dev/null; echo done")
+
+REACT / WEB UI QUALITY STANDARDS (apply to all React, Vue, and web app tasks):
+- SEPARATE CSS FILE: All styles MUST go in a dedicated .css file (e.g. App.css, Calculator.css). Do NOT use inline style objects or style props for layout or theming — use class names and a CSS file. This makes the code maintainable and testable.
+- MATHEMATICAL OPERATOR SYMBOLS: Use the correct Unicode characters for display, NOT ASCII keyboard characters:
+    Multiplication: × (U+00D7) — NOT "x" or "*"
+    Division:       ÷ (U+00F7) — NOT "/"
+    Minus:          − (U+2212) — NOT "-" (standard hyphen)
+    Plus/minus:     ± (U+00B1)
+  Exception: arithmetic computation logic (e.g. JS operators) must still use ASCII. Only the displayed text/labels should use Unicode.
+- KEYBOARD SUPPORT: For any interactive tool (calculator, editor, form, game), implement keydown event listeners for all primary actions. A calculator must respond to digit keys, Enter/=, Backspace, Escape (clear), and operator keys (+, -, *, /). Use useEffect with addEventListener/removeEventListener in React.
+- OPERATOR ACTIVE STATE: When an operator button is pressed and waiting for the second operand, highlight that operator button with an "active" CSS class so the user can see the pending operation.
+- FONT SCALING: If the display value can grow long (numbers, text input), scale the font size down dynamically when the content exceeds a threshold length (e.g. style={{ fontSize: display.length > 10 ? '22px' : '36px' }}).
+- EDGE CASES: Always handle: division by zero (show "Error"), floating-point noise (use toPrecision(12) then parseFloat), chained operations (pressing an operator mid-chain should evaluate first), and the decimal point (prevent double dots).
+- EXPORTED FUNCTIONS: If the task writes helper functions (math operations, formatters, utilities), export them from their own module (e.g. src/calc.js exports add, subtract, multiply, divide). Import them in the component. This makes unit testing straightforward.
 `;
 
 const SILVERSTRIPE_CODER_DIRECTIVE = `

@@ -48,7 +48,22 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles }) {
       { cwd: projectDir },
     );
     if (res.status !== 0) {
-      errors.push(`JS/TS Test Failure:\n${res.stdout || res.stderr}`);
+      const rawOutput = res.stdout || res.stderr || "";
+      // Extract "Cannot find module './X'" errors and give the coder specific guidance
+      // instead of a generic test failure — prevents the "test before source" failure loop.
+      const missingModuleMatches = [...rawOutput.matchAll(/Cannot find module ['"]([^'"]+)['"]/g)];
+      if (missingModuleMatches.length > 0) {
+        const missingPaths = [...new Set(missingModuleMatches.map((m) => m[1]))];
+        const hint =
+          `\n\nROOT CAUSE — MISSING SOURCE FILE(S):\n` +
+          missingPaths.map((p) => `  • The test imports '${p}' but that file does not exist yet.`).join("\n") +
+          `\n\nFIX: You MUST create the source file(s) BEFORE the test file can pass.\n` +
+          `For each missing module above, use write_file to create it with the exported functions/classes the test expects.\n` +
+          `Do NOT rewrite the test file — create the implementation file first.`;
+        errors.push(`JS/TS Test Failure:\n${rawOutput}${hint}`);
+      } else {
+        errors.push(`JS/TS Test Failure:\n${rawOutput}`);
+      }
     } else {
       log(colors.green("  [Verifier] JS/TS tests passed! 🟢"));
     }
