@@ -720,9 +720,11 @@ ${buildAcceptanceTestDirective(state.projectType)}
         );
         await new Promise((resolve) => setTimeout(resolve, waitMs));
 
-        // Nuclear override: after 2+ consecutive stalls, send a minimal bare-JSON
+        // Nuclear override: after 3+ consecutive stalls, send a minimal bare-JSON
         // prompt with zero prose so the provider cannot produce prose-only output.
-        if (stallCount >= 2) {
+        // (Bumped from 2 → 3 to allow one more normal retry — short stalls are
+        // common and don't always indicate the provider is truly stuck.)
+        if (stallCount >= 3) {
           log(colors.yellow(
             `  [Graph] -> ANTI-STALL NUCLEAR OVERRIDE after ${stallCount} consecutive stalls`,
           ));

@@ -254,6 +254,12 @@ CRITICAL RULES:
 NEW PROJECT SCAFFOLD ORDERING (CRITICAL for Node.js/React/Vite projects):
 If the task creates a new project from scratch, the FIRST subtask MUST write both .gitignore and README.md (they belong in the same scaffold subtask with package.json). The .gitignore MUST list node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. The README.md MUST include: project name, one-line description, and commands: npm install, npm run dev, npm run build, npm test. NEVER add fake entries (keys starting with "#") to package.json dependencies — the verifier will reject them.
 
+CSS FILE CONSOLIDATION (CRITICAL for React/Vue/Vite projects — prevents stylesheet proliferation):
+- ONE CSS file per component. The Vite scaffold creates src/App.css. ALL component styles for a small/medium app go in src/App.css — do NOT plan separate Chess.css, ChessGame.css, ChessBoard.css, Pieces.css subtasks.
+- NEVER plan multiple CSS-creation subtasks for the same component. If two subtasks would each touch styles, merge them so one subtask owns all styles for that component.
+- When a subtask modifies a component's JSX and styles, name the existing CSS file (App.css) in the "files" list — not a new filename. Multiple css files for one app = dead code (orphaned files not imported by any JSX).
+- Exception: a project with 5+ distinct screens may have one CSS per screen, all imported individually. Default for games/calculators/single-page apps: ONE CSS file (App.css).
+
 BYTE-SIZED SUBTASK RULES (CRITICAL — enforced by the pipeline):
 - Each implementation subtask MUST touch at most 3 files. If a change requires more, split it into multiple subtasks.
 - Prefer 6–12 subtasks for a medium feature. More subtasks = better visibility, easier resume, less hallucination.
