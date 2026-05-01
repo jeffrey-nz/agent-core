@@ -2188,6 +2188,30 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
     try {
       const pkgPath = path.join(state.projectDir, "package.json");
       const pkgRaw = await fs.promises.readFile(pkgPath, "utf8").catch(() => null);
+
+      // Detect Vite/React project by presence of vite.config.ts (even if package.json is absent).
+      const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts")).then(() => true).catch(() => false);
+      const hasSrcDir = await fs.promises.access(path.join(state.projectDir, "src")).then(() => true).catch(() => false);
+      const isViteProject = hasViteConfig && hasSrcDir;
+
+      // package.json missing entirely — scaffold failed to commit it.
+      if (!pkgRaw && isViteProject) {
+        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+        log(colors.red(`  [Verifier] package.json is missing from Vite project. Retry ${newRetryCount}.`));
+        eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: package.json missing — scaffold incomplete`, type: "warning" });
+        await archiveAndRevert(state);
+        const atCap = newRetryCount >= effectiveMaxRetries;
+        const capWarning = atCap ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL issues.` : "";
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetryCount,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER AUTOMATED FEEDBACK — MISSING PACKAGE.JSON]\n\nThis is a Vite/React project (vite.config.ts exists in ${state.projectDir}) but package.json does not exist.\n\nYou MUST create package.json with all required fields:\n{\n  "name": "chess-game",\n  "private": true,\n  "version": "0.0.1",\n  "type": "module",\n  "scripts": { "dev": "vite", "build": "tsc && vite build", "preview": "vite preview" },\n  "dependencies": { "react": "^18.2.0", "react-dom": "^18.2.0" },\n  "devDependencies": { "@vitejs/plugin-react": "^4.2.1", "vite": "^5.0.8", "typescript": "^5.2.2", "@types/react": "^18.2.43", "@types/react-dom": "^18.2.17" }\n}\n\nThen run: npm install\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
+          }],
+        };
+      }
+
       if (pkgRaw) {
         const pkg = JSON.parse(pkgRaw);
         const buildScript = pkg.scripts?.build || "";
@@ -2195,9 +2219,6 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
 
         // Detect corrupted package.json: vite.config.ts present but no build script.
         // This happens when the coder repeatedly rewrites package.json and loses the scripts section.
-        const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts")).then(() => true).catch(() => false);
-        const hasSrcDir = await fs.promises.access(path.join(state.projectDir, "src")).then(() => true).catch(() => false);
-        const isViteProject = hasViteConfig && hasSrcDir;
         const isMissingBuildScript = !pkg.scripts?.build;
         const isMissingReactDeps = isViteProject && !pkg.dependencies?.react && !pkg.devDependencies?.react;
         if (isViteProject && (isMissingBuildScript || isMissingReactDeps)) {
