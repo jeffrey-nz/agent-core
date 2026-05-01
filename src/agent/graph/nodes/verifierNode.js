@@ -407,6 +407,37 @@ async function _verifierImpl(state) {
   eventBus.emit("persona_change", { ...PERSONA, description: "Checking syntax, compilation, and page rendering" });
   eventBus.emit("phase_change", { phase: "VERIFYING", label: "Verifying..." });
 
+  // Scaffold health check: if TypeScript source files exist but critical scaffold
+  // files are missing (lost to archiveAndRevert from a failed earlier subtask),
+  // block and ask the coder to restore them before continuing. This fires on every
+  // subtask after the scaffold so a missing package.json/vite.config never silently
+  // cascades through the rest of the pipeline.
+  if (state.projectDir && (state.currentSubtaskIndex ?? 0) >= 1) {
+    const srcHasTsFiles = await fs.promises.readdir(path.join(state.projectDir, "src"))
+      .then(files => files.some(f => /\.(ts|tsx)$/.test(f)))
+      .catch(() => false);
+    if (srcHasTsFiles) {
+      const scaffoldToCheck = ["package.json", "src/App.tsx", "vite.config.ts", "index.html"];
+      const missingScaffold = [];
+      for (const f of scaffoldToCheck) {
+        const exists = await fs.promises.access(path.join(state.projectDir, f)).then(() => true).catch(() => false);
+        if (!exists) missingScaffold.push(f);
+      }
+      if (missingScaffold.length > 0) {
+        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+        log(colors.red(`  [Graph] -> Verifier: scaffold health check FAILED — missing: ${missingScaffold.join(", ")}`));
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetryCount,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER SCAFFOLD HEALTH CHECK]\n\nCritical project files are missing from disk (lost during a previous rollback):\n${missingScaffold.map(f => `  • ${f}`).join("\n")}\n\nBefore implementing the current subtask, you MUST restore these files:\n• package.json — with scripts (dev/build), react/react-dom dependencies, vite/typescript devDependencies\n• vite.config.ts — import { defineConfig } from 'vite'; import react from '@vitejs/plugin-react'; export default defineConfig({ plugins: [react()] });\n• index.html — standard Vite React entry point with <div id="root"> and <script src="/src/main.tsx">\n• src/App.tsx — basic App skeleton (will be updated by a later subtask)\n\nCreate ALL missing files first using write_file, then also write the planned files for the current subtask in the same response.`,
+          }],
+        };
+      }
+    }
+  }
+
   // If the coder turn itself failed (e.g. SESSION_BUSY, TURN_SKIPPED), the
   // modifiedFiles list is stale (accumulated from prior subtasks). Always fail
   // here rather than letting stale files produce a false PASS.

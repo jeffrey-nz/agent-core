@@ -599,9 +599,13 @@ export async function coderNode(state, config) {
   // reason so the coder knows what kind of problem to address (code error vs
   // environment issue) rather than guessing a "different strategy" blindly.
   const retryCount = state.coderRetryCount ?? 0;
-  // Detect stall retries (TURN_SKIPPED) so the reflexion message can explain
-  // that the previous turn produced prose instead of tool calls (Shinn et al. 2023).
-  const isStallRetry = retryCount > 0 && (state.lastCoderResponse?.includes("TURN_SKIPPED") ?? false);
+  // Detect stall retries: either explicit TURN_SKIPPED sentinel OR no tools were
+  // executed last turn (inaction). Both indicate the previous response produced
+  // prose/text without JSON tool calls — the stall guidance explicitly corrects this.
+  const isStallRetry = retryCount > 0 && (
+    (state.lastCoderResponse?.includes("TURN_SKIPPED") ?? false) ||
+    (state.lastToolsExecuted?.length ?? 0) === 0
+  );
   let retrySection = "";
   if (retryCount > 0 && state.lastCoderResponse) {
     const prevSummary = state.lastCoderResponse.slice(0, 400);
