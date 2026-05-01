@@ -488,6 +488,12 @@ REACT / WEB UI QUALITY STANDARDS (apply to all React, Vue, and web app tasks):
   3. For each CSS selector in the .css file (e.g. .board, .square, .light-square), confirm it matches a className actually used in the JSX. If NOT found → the selector is dead code and will never apply. Either rename the CSS class to match, or update the JSX className.
   4. Pay special attention to compound selectors: .square.light only matches an element with BOTH classes "square" AND "light" — this is different from .light-square (a single hyphenated class). If JSX uses className="light-square" then the CSS must be .light-square { } not .square.light { }.
   5. If any mismatch is found: fix it before reporting the subtask complete — do NOT leave mismatched selectors in place.
+- CSS FILE DISCIPLINE (PREVENTS PROLIFERATION): For each component, ONE CSS file owns its styles. Before writing any CSS:
+  1. Search the project for existing CSS files: execute_bash("find {projectDir}/src -name '*.css' | head -20")
+  2. If a CSS file for this component already exists (even under a different name like ChessGame.css, Chess.css, or ChessBoard.css), EDIT that file — do NOT create a new one.
+  3. The CSS import in the JSX MUST reference whichever file you edited. If the import says "import './App.css'" then edit App.css, not Chess.css.
+  4. NEVER create a new CSS file during a retry if ANY css file already exists for this component. Creating Chess.css, ChessGame.css, ChessGame.styles.css, and ChessBoard.css across retries is a pipeline failure — pick one file and fix it in place.
+  5. Orphaned CSS files (not imported by any JSX) are dead code. Delete them rather than leaving them.
 - NO-OP SUBTASK SELF-CHECK: If a subtask says "run tests and verify" or "run the build" but does NOT require writing files, output [] immediately after running the tools and confirming success. Do NOT write stub files, placeholder files, or package.json markers to satisfy a "must write a file" requirement. The verifier accepts execution-only subtasks (files:[] in the plan) when an execution tool is called.
 `;
 
