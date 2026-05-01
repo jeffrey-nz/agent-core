@@ -25,11 +25,13 @@ export async function runAdvancedValidator(projectDir, modifiedFilesAbs) {
     errors.push(...(await checkHttpSmoke(projectDir, modifiedFilesAbs)));
   }
 
-  // Dev server + AI visual verification: React/Vite projects only.
-  // Spins up `npm run dev`, screenshots the running app, and asks Claude Vision
-  // to check for broken styles, missing board coloring, invisible pieces, etc.
-  // The try/finally guarantees the dev server is killed even if vision throws.
-  if (errors.length === 0) {
+  // Dev server + visual verification: only when JSX/TSX/CSS files were modified.
+  // Skipping on test-only or logic-only subtasks avoids noise when the UI isn't
+  // expected to be fully functional yet.
+  const hasUiChanges = modifiedFilesAbs.some((f) =>
+    /\.(jsx|tsx|css|html|svg)$/.test(f),
+  );
+  if (errors.length === 0 && hasUiChanges) {
     let devServerResult = null;
     try {
       devServerResult = await startDevServer(projectDir);

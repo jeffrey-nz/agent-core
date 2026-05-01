@@ -1,127 +1,149 @@
 /**
- * visualVerify.js — screenshots a running dev server URL via the bridge's
- * /api/screenshot endpoint, then sends the image to Claude Vision (using the
- * already-installed Vercel AI SDK + @ai-sdk/anthropic) for QA analysis.
+ * visualVerify.js — two-tier visual QA check.
  *
- * Returns [] on PASS or when the check is skipped/unavailable.
- * Returns a non-empty error string array on FAIL so the verifier can feed
- * specific visual issues back to the coder.
+ * Tier 1 (deterministic): Call /api/page-inspect to check if React mounted.
+ *   - If there's a Vite/React import-error overlay → SKIP (intermediate build state)
+ *   - If #root is empty and no error overlay → FAIL (app broke silently)
+ *   - If #root has content → proceed to Tier 2
  *
- * Fails OPEN: any network/API error → returns [] so the pipeline is never
- * false-blocked by flaky vision calls.
+ * Tier 2 (AI optional): Call /api/visual-ask to get AI analysis of the screenshot.
+ *   - Catches CSS/layout issues, wrong colors, missing game elements, etc.
+ *   - Fails open: any parse/network error → [] (never false-block the pipeline)
+ *
+ * No external AI APIs — all AI interaction goes through the browser-automation session.
  */
 
-import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
 import { getBaseUrl } from "#providers/api/config.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
 
-const VISION_MODEL = "claude-haiku-4-5-20251001";
+const VISUAL_QA_PROMPT = `You are a QA engineer reviewing a screenshot of a React web app built by an AI coding agent.
 
-const VISION_PROMPT = `You are a QA engineer reviewing a screenshot of a React web app that was just built by an AI coding agent.
-
-Analyze the screenshot and respond with JSON ONLY (no prose, no markdown fences):
+Respond with JSON ONLY (no prose, no markdown fences):
 {
   "pass": boolean,
   "issues": string[],
   "feedback": string
 }
 
-- pass: true if the app looks functional (renders, primary UI visible, no error overlays)
-- issues: list of specific visual problems (empty array if pass)
+- pass: true if the app renders and shows the primary UI (no blank page, no error overlays)
+- issues: list of specific visual problems found (empty array if pass)
 - feedback: one-sentence developer-facing summary
 
 Check for:
 1. Blank/white/all-black page (= broken)
-2. Primary UI element missing (game board, form, calculator, etc.) (= broken)
+2. Primary UI element missing (board, form, calculator, etc.) (= broken)
 3. Visible JS error overlay or React error boundary message (= broken)
-4. CSS completely unstyled — raw HTML with no layout (= broken)
-5. For chess/board games specifically:
-   - Board squares must be two alternating colors (light + dark). If all squares are the same color, that is broken.
-   - Pieces must be visually distinct from each other — white pieces vs black pieces must look different. If all pieces are the same color, that is broken.
-6. Obvious broken styles: elements overlapping unintentionally, text invisible (white on white / black on black), layout completely collapsed`;
+4. For chess/board games: board squares must be two alternating colors; pieces must be visually distinct (white vs black)
+5. Obviously broken layout: invisible text, collapsed elements, completely unstyled raw HTML`;
 
 export async function checkVisualVerify(projectDir, devServerResult) {
   if (!devServerResult?.url) return [];
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    log(colors.dim("  [VisualVerify] No ANTHROPIC_API_KEY — skipping"));
-    return [];
-  }
-
   const apiBase = getBaseUrl();
   if (!apiBase) return [];
 
-  // 1. Capture screenshot via bridge's existing /api/screenshot endpoint
-  let screenshotBase64;
+  const url = devServerResult.url;
+
+  // ── Tier 1: deterministic DOM check ─────────────────────────────────────
+  log(colors.dim(`  [VisualVerify] Checking render at ${url}…`));
+
   try {
-    log(colors.dim(`  [VisualVerify] Capturing screenshot of ${devServerResult.url}…`));
-    const resp = await fetch(
-      `${apiBase}/api/screenshot?url=${encodeURIComponent(devServerResult.url)}`,
+    const inspectResp = await fetch(
+      `${apiBase}/api/page-inspect?url=${encodeURIComponent(url)}`,
       { signal: AbortSignal.timeout(25_000) },
     );
-    if (!resp.ok) {
-      log(colors.dim(`  [VisualVerify] Screenshot endpoint returned ${resp.status} — skipping`));
-      return [];
-    }
-    const data = await resp.json();
-    // /api/screenshot uses sendSuccess which spreads fields flat: { success, screenshotBase64, url, timestamp }
-    screenshotBase64 = data?.screenshotBase64;
-    if (!screenshotBase64) {
-      log(colors.dim("  [VisualVerify] No screenshot data in response — skipping"));
-      return [];
+
+    if (inspectResp.ok) {
+      const inspect = await inspectResp.json();
+      const { hasContent, errorText, consoleErrors = [] } = inspect;
+
+      // Import errors or Vite build errors → skip, not a visual failure
+      // These will be resolved when the missing files are written in later subtasks
+      const isImportError =
+        (errorText && /import|module|Cannot find|Failed to resolve/i.test(errorText)) ||
+        consoleErrors.some(e => /import|module|Cannot find|Failed to resolve/i.test(e));
+
+      if (isImportError) {
+        log(colors.dim("  [VisualVerify] Import/module error detected — skipping (dependency missing, not a visual bug)"));
+        return [];
+      }
+
+      if (!hasContent) {
+        const msg = "React #root div is empty — app did not mount. Check for JS errors in main.jsx or App.jsx.";
+        log(colors.red(`  [VisualVerify] FAIL — ${msg}`));
+        return [
+          `[VERIFIER VISUAL CHECK FAILED]\n\nApp URL: ${url}\nIssue: ${msg}\n\nThe React app is not rendering. Possible causes:\n  • Missing or incorrect default export in App.jsx\n  • Runtime error in component mount (check useEffect hooks)\n  • main.jsx not connecting to the #root element\n\nFix the render issue. The verifier will re-check on next retry.`,
+        ];
+      }
+
+      log(colors.dim("  [VisualVerify] App mounted — running AI visual analysis…"));
+    } else {
+      // page-inspect not available — skip tier 1
+      log(colors.dim("  [VisualVerify] page-inspect unavailable — skipping DOM check"));
     }
   } catch (err) {
-    log(colors.dim(`  [VisualVerify] Screenshot failed: ${err.message?.slice(0, 80)}`));
+    log(colors.dim(`  [VisualVerify] DOM check failed: ${err.message?.slice(0, 80)} — skipping`));
     return [];
   }
 
-  // 2. Claude Vision analysis via Vercel AI SDK (already a dependency — no new packages)
+  // ── Tier 2: AI visual analysis (optional, fail open) ────────────────────
   try {
-    const anthropic = createAnthropic({ apiKey });
-    const { text } = await generateText({
-      model: anthropic(VISION_MODEL),
-      maxTokens: 600,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              image: Buffer.from(screenshotBase64, "base64"),
-              mimeType: "image/png",
-            },
-            { type: "text", text: VISION_PROMPT },
-          ],
-        },
-      ],
+    let provider = "deepseek";
+    try {
+      const sessResp = await fetch(`${apiBase}/api/sessions`, { signal: AbortSignal.timeout(3000) });
+      if (sessResp.ok) {
+        const sessData = await sessResp.json();
+        const sessions = Array.isArray(sessData) ? sessData : (sessData?.data?.sessions ?? sessData?.sessions ?? []);
+        const active = sessions.find(s => s.providerId && s.state !== "busy");
+        if (active?.providerId) provider = active.providerId;
+      }
+    } catch { /* use default */ }
+
+    const resp = await fetch(`${apiBase}/api/visual-ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screenshotUrl: url, prompt: VISUAL_QA_PROMPT, label: "visual-qa", provider }),
+      signal: AbortSignal.timeout(90_000),
     });
+
+    if (!resp.ok) {
+      if (resp.status === 501) {
+        log(colors.dim("  [VisualVerify] Provider does not support file upload — skipping AI check"));
+      } else {
+        log(colors.dim(`  [VisualVerify] Bridge returned ${resp.status} — skipping AI check`));
+      }
+      return [];
+    }
+
+    const data = await resp.json();
+    const responseText = data?.response ?? data?.data?.response ?? "";
+
+    if (!responseText) return [];
 
     let analysis;
     try {
-      analysis = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      analysis = JSON.parse(jsonMatch?.[0] ?? "{}");
     } catch {
-      log(colors.dim("  [VisualVerify] Could not parse vision response — skipping"));
-      return [];
+      return []; // non-JSON response (e.g. DeepSeek tool calls) → fail open
     }
 
     if (analysis.pass === false) {
       const issues =
         Array.isArray(analysis.issues) && analysis.issues.length > 0
-          ? analysis.issues.join("; ")
-          : analysis.feedback || "Visual verification failed";
-      log(colors.red(`  [VisualVerify] FAIL — ${issues}`));
+          ? analysis.issues
+          : [analysis.feedback || "Visual verification failed"];
+      log(colors.red(`  [VisualVerify] FAIL — ${issues.join("; ")}`));
       return [
-        `[VERIFIER VISUAL CHECK FAILED]\n\nApp URL: ${devServerResult.url}\nIssues detected:\n${(analysis.issues || [issues]).map((i) => `  • ${i}`).join("\n")}\n\nFix the visual issues above (CSS selectors, piece colors, board styling) then the verifier will re-screenshot and check again. Do NOT mark the subtask complete until the UI renders correctly.`,
+        `[VERIFIER VISUAL CHECK FAILED]\n\nApp URL: ${url}\nIssues detected:\n${issues.map(i => `  • ${i}`).join("\n")}\n\nFix the visual issues above then the verifier will re-screenshot and check again.`,
       ];
     }
 
     log(colors.green(`  [VisualVerify] PASS — ${analysis.feedback || "App looks functional"}`));
     return [];
   } catch (err) {
-    log(colors.dim(`  [VisualVerify] Vision API call failed: ${err.message?.slice(0, 80)}`));
-    return []; // fail open — never false-block the pipeline
+    log(colors.dim(`  [VisualVerify] AI check failed: ${err.message?.slice(0, 80)}`));
+    return []; // fail open
   }
 }

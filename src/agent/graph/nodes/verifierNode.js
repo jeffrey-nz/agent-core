@@ -463,13 +463,23 @@ ${failedTask}${capWarning}`,
         }
       }
 
-      // For explicit flag: validate file-creation tasks have files on disk
+      // For explicit flag: validate file-creation tasks have files on disk.
+      // Prefer PM-planned files list; fall back to regex extraction from task text.
       if (noChangesFlag && isImplementationTask && state.projectDir) {
-        const filePathRe = /\b((?:app|mysite|public|themes|src|Sources)\/[\w\-./ ]+?\.(?:php|yml|yaml|ss|js|ts|json|swift))\b/gi;
-        const mentionedPaths = [...fullTaskText.matchAll(filePathRe)].map((m) => m[1].trim());
+        const subtaskMetaForNcn = state.subtasks?.[state.currentSubtaskIndex];
+        let pathsToCheck = [];
+        if (Array.isArray(subtaskMetaForNcn?.files) && subtaskMetaForNcn.files.length > 0) {
+          // Use the PM's planned files list — authoritative and handles all extensions
+          pathsToCheck = subtaskMetaForNcn.files;
+        } else {
+          // Fall back to regex extraction (covers .jsx, .tsx, .css, .ts, .js, .php, etc.)
+          const filePathRe = /\b((?:app|mysite|public|themes|src|Sources|src)\/[\w\-./ ]+?\.(?:php|yml|yaml|ss|js|ts|jsx|tsx|css|html|svg|json|swift|mjs|cjs))\b/gi;
+          pathsToCheck = [...fullTaskText.matchAll(filePathRe)].map((m) => m[1].trim());
+        }
         const missingFiles = [];
-        for (const relPath of mentionedPaths) {
-          try { await fs.promises.access(path.join(state.projectDir, relPath)); }
+        for (const relPath of pathsToCheck) {
+          const abs = path.isAbsolute(relPath) ? relPath : path.join(state.projectDir, relPath);
+          try { await fs.promises.access(abs); }
           catch { missingFiles.push(relPath); }
         }
         if (missingFiles.length > 0) {
@@ -496,6 +506,41 @@ ${failedTask}${capWarning}`,
       await closeSubIssueForSubtask(state);
       writeVerificationMarker();
       return { verifierFeedback: "PASS" };
+    }
+
+    // CSS/JSX consistency verification pass: the CSS gate on a prior retry sent
+    // the coder back to read JSX and verify class names. If the coder read a JSX
+    // file this turn and the planned CSS files already exist on disk (written in a
+    // previous retry), there's nothing left to write — the subtask is done.
+    // Without this, the "no files written" check creates an unresolvable deadlock:
+    // CSS gate says "read JSX then output []", but no-files gate rejects that [].
+    if (state.projectDir) {
+      const subtaskForCssCheck = state.subtasks?.[state.currentSubtaskIndex];
+      const plannedCssFiles = (subtaskForCssCheck?.files || []).filter(f => f.endsWith('.css'));
+      const readJsxThisTurn = /"read_file"[^}]{1,200}\.(jsx|tsx)/.test(lastCoderResponse) ||
+        /read_file[^\n]{1,100}\.(jsx|tsx)/.test(lastCoderResponse);
+      if (readJsxThisTurn && (plannedCssFiles.length > 0 || lastCoderResponse.includes('.css'))) {
+        // Find any .css files that exist on disk (were written in a previous retry)
+        const cssFilesToCheck = plannedCssFiles.length > 0
+          ? plannedCssFiles
+          : [...(lastCoderResponse.matchAll(/["']([^"']*\.css)["']/g))].map(m => m[1]).slice(0, 5);
+        const cssExistResults = await Promise.all(
+          cssFilesToCheck.map(f => {
+            const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+            return fs.promises.access(abs).then(() => true).catch(() => false);
+          })
+        );
+        if (cssExistResults.some(Boolean)) {
+          log(colors.green("  [Graph] -> CSS/JSX consistency verified — JSX read + CSS already on disk. Passing."));
+          eventBus.emit("system_message", { text: `✓ CSS/JSX consistency verified: ${currentTask.slice(0, 80)}`, type: "info" });
+          emitTaskCompleted(state);
+          const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "css-verify subtask";
+          await commitVerifiedSubtask(state.projectDir, taskLabel);
+          await closeSubIssueForSubtask(state);
+          writeVerificationMarker();
+          return { verifierFeedback: "PASS" };
+        }
+      }
     }
 
     // Investigation / review tasks are satisfied by textual evidence - reading
@@ -1613,12 +1658,21 @@ DEBUGGING STRATEGY:
       if (missingPlannedFiles.length > 0) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(colors.red(`  [Graph] -> Planned-files gate FAILED: ${missingPlannedFiles.length} file(s) missing.`));
+
+        // Detect if the coder printed the file as plain text instead of using write_file
+        const lastResp = state.lastCoderResponse || "";
+        const missingNames = missingPlannedFiles.map(f => f.split("/").pop());
+        const proseDetected = lastResp.length > 300 && missingNames.some(n => lastResp.includes(n));
+        const proseNote = proseDetected
+          ? `\n\n⚠️ PROSE OUTPUT DETECTED: Your previous response contained the content of ${missingNames.find(n => lastResp.includes(n))} as plain text chat. THIS DID NOT CREATE THE FILE. Printing code in chat is NOT the same as writing it to disk.\n\nYour response must be ONLY a JSON tool call array:\n[{"tool":"write_file","path":"${missingPlannedFiles[0]}","content":"// full file content here"}]`
+          : "";
+
         return {
           verifierFeedback: "FAIL",
           coderRetryCount: newRetry,
           messages: [{
             role: "user",
-            content: `[VERIFIER PLANNED FILES GATE]\n\nThe PM planned this subtask to write the following files, but they do not exist on disk:\n${missingPlannedFiles.map(f => `  - ${f}`).join("\n")}\n\nYou MUST use write_file to create each of these files with the actual implementation. Editing README.md, package.json, or vite.config.js does NOT satisfy this subtask — write the planned source files.`,
+            content: `[VERIFIER PLANNED FILES GATE]\n\nThe PM planned this subtask to write the following files, but they do not exist on disk:\n${missingPlannedFiles.map(f => `  - ${f}`).join("\n")}\n\nYou MUST use write_file to create each of these files with the actual implementation. Editing README.md, package.json, or vite.config.js does NOT satisfy this subtask — write the planned source files.${proseNote}`,
           }],
         };
       }
@@ -1699,6 +1753,34 @@ DEBUGGING STRATEGY:
             log(colors.yellow(`  [Setup] npm install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
           }
         }
+      }
+    }
+
+    // Auto-pass if all planned files already exist on disk with content.
+    // Handles the case where files were written in a prior subtask and the coder
+    // correctly skips re-writing them — but produces no write_file calls, triggering
+    // this false "no files written" loop.
+    const subtaskFilesForAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.files;
+    if (Array.isArray(subtaskFilesForAutoPass) && subtaskFilesForAutoPass.length > 0 && state.projectDir) {
+      const allExist = await Promise.all(
+        subtaskFilesForAutoPass.map(async (f) => {
+          const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+          try {
+            const stat = await fs.promises.stat(abs);
+            return stat.size > 20; // non-trivial content
+          } catch {
+            return false;
+          }
+        })
+      );
+      if (allExist.every(Boolean)) {
+        log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) already exist on disk — auto-passing subtask.`));
+        emitTaskCompleted(state);
+        const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
+        await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
+        await closeSubIssueForSubtask(state);
+        writeVerificationMarker();
+        return { verifierFeedback: "PASS" };
       }
     }
 

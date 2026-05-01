@@ -131,7 +131,8 @@ const NODE_CONSTRAINTS = `[PROJECT TYPE: Node.js / TypeScript]
 PROJECT SETUP (MANDATORY for all new Node.js / React / Vite projects — enforced by verifier):
 - GITIGNORE FIRST: The VERY FIRST file written for any new project MUST be .gitignore. It MUST contain at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. Skipping this causes git to track thousands of dependency files — the verifier will reject the subtask.
 - README REQUIRED: Every new project MUST include README.md with: project name, one-line description, and the commands: npm install, npm run dev, npm run build, npm test.
-- NO FAKE DEPS: NEVER add non-package entries to package.json dependencies or devDependencies. Keys starting with "#" (e.g. "#test-run", "#acceptance-test", "#marker") are NOT valid npm syntax and will be detected and rejected by the verifier. Track task completion in code or comments — never in package.json.`;
+- NO FAKE DEPS: NEVER add non-package entries to package.json dependencies or devDependencies. Keys starting with "#" (e.g. "#test-run", "#acceptance-test", "#marker") are NOT valid npm syntax and will be detected and rejected by the verifier. Track task completion in code or comments — never in package.json.
+- NO DEV SERVER IN EXECUTE_BASH: NEVER run "npm run dev", "vite", "next dev", or any other long-running dev server command via execute_bash. These commands block forever and will time out. The verifier automatically starts and stops the dev server — you do NOT need to do this.`;
 
 const UNKNOWN_CONSTRAINTS = `[PROJECT TYPE: Unknown — explore the project structure before making assumptions about tooling or conventions]`;
 

@@ -388,6 +388,8 @@ ${semanticContext || "No semantic context found."}
 ${researchDirective}
 
 PRE-FLIGHT APPLICATION HEALTH CHECK (web/server-side projects — run at the START of research):
+SKIP THIS ENTIRE SECTION if the task is to BUILD A NEW PROJECT from scratch (keywords: "build", "create", "write", "implement" + "new", "from scratch", "from the ground up") — there is no running server yet. Skip directly to codebase analysis.
+SKIP THIS SECTION for React/Vite/Next.js frontend-only projects with NO running dev server — making an http_request to localhost will hang for 60+ seconds and stall the pipeline. If you detect a Vite/React project (package.json contains "vite" or "react-dom"), proceed directly to code reading.
 Before reading any source code, discover the running application URL and make ONE http_request health check:
 1. URL DISCOVERY: Check the project config for the base URL:
    - .env / .env.local file (look for BASE_URL, APP_URL, SS_BASE_URL, SITE_URL, etc.)
@@ -429,8 +431,9 @@ Parse the response for: which items appear, what markup they have, any error str
 One tool call may fully characterize the bug. Do not read source files first.
 
 FEATURE IMPLEMENTATION TASKS (when the task asks to add, create, build, or implement something new):
+NOTE: For React/Vite/frontend-only projects without a running dev server, SKIP Step 1 — no server is running and http_request will hang. Go directly to Step 2 (codebase analysis).
 
-Step 1 — Establish current state with http_request FIRST:
+Step 1 — Establish current state with http_request FIRST (server-side projects only):
   Call http_request on the relevant page or endpoint before reading any code.
   This shows what actually renders vs what the code suggests should render.
   (A db:build can succeed while a feature is broken if a template file is missing — live verification catches this.)

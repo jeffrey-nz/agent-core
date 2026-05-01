@@ -30,11 +30,25 @@ export const shellToolDefs = [
   },
 ];
 
+// Commands that block indefinitely — kill them before they waste the 2-min stall timeout.
+const BLOCKING_CMD_PATTERNS = [
+  /\bnpm\s+(run\s+)?(dev|start|serve|preview)\b/,
+  /\bvite(\s|$)/,
+  /\bnext\s+dev\b/,
+  /\bnuxt\s+dev\b/,
+  /\bng\s+serve\b/,
+  /\bexpo\s+start\b/,
+];
+
 export async function executeShellTool(name, input, { rootDir }) {
   if (name === "execute_bash") {
     const cmd = input.command || input.cmd;
     if (!cmd || typeof cmd !== "string") {
       return `[ERROR] execute_bash requires a 'command' string parameter. You provided: ${JSON.stringify(input)}`;
+    }
+
+    if (BLOCKING_CMD_PATTERNS.some(p => p.test(cmd))) {
+      return `[BLOCKED] "${cmd}" starts a long-running dev server and will hang the pipeline. Do NOT run dev servers directly.\n\n• To verify the build compiles: use \`npm run build\`\n• The pipeline's visual verification system will start and screenshot the app automatically after your files are verified.\n\nProceed with other verification steps (build check, lint, tests).`;
     }
 
     const safeCmd = cmd;
