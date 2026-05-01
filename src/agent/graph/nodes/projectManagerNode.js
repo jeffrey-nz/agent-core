@@ -385,9 +385,18 @@ NEW_PROJECT MODE — You are building a brand-new application from scratch. Ther
 - The SCOPE DOCUMENT may be empty or minimal — use the INTENT ANALYSIS and ORIGINAL TASK as your primary guide.
 - Plan COMPREHENSIVE coverage: every feature mentioned in the task must have a subtask that creates the code for it.
 - Each subtask should create a coherent set of related files (e.g. "Create chess engine types and board logic", "Create piece move generators", etc.).
-- First subtask must always install dependencies (npm install) and ensure the project builds (npm run build).
-- Last subtask should be a full integration: wire all components together and verify the app runs (npm run dev starts without errors).
-- implementation_note must describe WHAT TO CREATE, not what to modify.`;
+- First subtask must install dependencies (npm install) AND create tsconfig.json, vite.config.ts, index.html, package.json WITH all required deps (including eslint-plugin-react-hooks for React projects). Verify npm run build succeeds.
+- Last subtask should be a full integration: wire all components together and verify the app runs (npm run dev starts without errors, npm run build exits 0).
+- implementation_note must describe WHAT TO CREATE, not what to modify.
+
+REACT GAME PROJECT SUBTASK RULES:
+- The scaffold subtask MUST include eslint-plugin-react-hooks in devDependencies and configure it in eslint.config.js
+- The scaffold subtask MUST include tsconfig.json (not just tsconfig.app.json) for full project type-checking
+- For AI/game opponents: there must be a dedicated "Wire AI opponent and game state in App.tsx" subtask
+  - This subtask MUST use useRef (not useState) for the AI-thinking semaphore
+  - The AI effect must only depend on game state that triggers it (e.g. currentTurn), NOT on the semaphore itself
+- Chess piece rendering subtask MUST use Unicode symbols: ♔♕♖♗♘♙ (white), ♚♛♜♝♞♟ (black) — never bare letters
+- Visual styling subtask must include: 70px minimum square size, piece font-size 2.5rem+, hover cursor pointer, selected square highlight, legal move dots`;
   }
 
   if (state.taskType === "direct_fix") {

@@ -36,13 +36,17 @@ The intent document will be used by:
 
 IMPORTANT — for "new project" tasks (build a game, app, tool from scratch):
 Expand the user's brief description into comprehensive, production-quality requirements. If the user says "build a chess game", infer ALL expected features a quality chess game needs:
-- Complete rules for all piece types and special moves
-- Game state management (check, checkmate, stalemate, draws)
+- Complete rules for all piece types and special moves (castling, en passant, pawn promotion)
+- Game state management (check, checkmate, stalemate detection)
 - Clean visual UI with PROPER piece rendering: for chess, pieces MUST use Unicode symbols (♔♕♖♗♘♙♚♛♜♝♞♟) or SVG images — never bare letter codes (K/Q/R/B/N/P) which are unacceptable
-- Highlighted selected squares, legal move indicators (dots or colored overlays)
-- AI opponent or two-player mode
+- Highlighted selected squares, legal move indicators (dots or colored overlays on valid destination squares)
+- AI opponent that responds automatically after the player moves (event-driven, NOT polling)
 - TypeScript types, responsive design, npm run build exits 0
-Include these as specific success_criteria even if not explicitly mentioned by the user.
+
+CRITICAL — AI OPPONENT ACCEPTANCE CRITERIA (add these as verifiable success_criteria):
+- "After white makes any legal move, the black AI automatically responds within 1 second without any user interaction"
+- "AI opponent uses useRef (not useState) for the 'AI is thinking' semaphore to avoid React useEffect timer cancellation"
+- "No infinite re-render loops: the game state stabilizes after each move"
 
 VISUAL QUALITY RULE for all interactive/game projects: game entities (pieces, cards, tiles, etc.) must be rendered using recognizable visual elements (Unicode symbols, SVG images, proper icons), not bare letter/number codes.
 

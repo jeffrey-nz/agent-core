@@ -322,6 +322,25 @@ async function checkProjectSetup(projectDir) {
         );
       }
     }
+
+    // React projects must include eslint-plugin-react-hooks to catch useEffect dependency bugs.
+    // Missing deps in useEffect dependency arrays cause broken AI opponents, stale closures,
+    // infinite loops, and timer-cancellation bugs that are invisible to tsc.
+    const hasReact = !!(pkg.dependencies?.react || pkg.devDependencies?.react);
+    if (hasReact) {
+      const hasReactHooksPlugin = !!(
+        pkg.devDependencies?.["eslint-plugin-react-hooks"] ||
+        pkg.dependencies?.["eslint-plugin-react-hooks"]
+      );
+      if (!hasReactHooksPlugin) {
+        errors.push(
+          "React project is MISSING eslint-plugin-react-hooks in devDependencies. " +
+            "This plugin catches useEffect/useCallback dependency bugs that cause broken AI opponents, " +
+            "stale closures, and infinite re-render loops at lint time rather than runtime. " +
+            "Add to devDependencies: \"eslint-plugin-react-hooks\": \"^5.0.0\" and configure it in eslint.config.js.",
+        );
+      }
+    }
   } catch {
     /* JSON parse errors are caught by the syntax validator */
   }
@@ -2109,26 +2128,23 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
         ).catch((e) => ({ stdout: e.stdout || "", stderr: e.stderr || "", status: 1 }));
 
         const tscOutput = (tscResult.stdout || "").trim();
-        // When tsconfig itself is newly written, ALL project files now fall under
-        // type-checking for the first time — surface errors in any file so that
-        // pre-existing type errors committed before the tsconfig existed are caught
-        // rather than silently accumulating until the final build fails.
-        const tsconfigJustCreated = (state.modifiedFiles || []).some(
-          f => /tsconfig(\.\w+)?\.json$/.test(path.basename(f))
-        );
-        // Otherwise only surface errors in files that were just written — pre-existing
-        // errors in other subtasks' files would unfairly block an unrelated subtask.
+        // Surface ALL TypeScript errors across the whole project — not just modified files.
+        // Filtering to modified files caused errors to accumulate silently across subtasks,
+        // producing a project that "passed" every individual check but failed npm run build.
+        // The coder is expected to fix any errors it finds, even in files it didn't write,
+        // because all files are part of the same codebase and must compile together.
         const modifiedBaseNames = new Set((state.modifiedFiles || []).map(f => path.basename(f)));
-        const tscErrors = tscOutput
+        const allTscErrors = tscOutput
           .split("\n")
-          .filter(l => {
-            if (!l.includes("error TS") && !(l.includes(": error") && l.includes(".ts"))) return false;
-            if (tsconfigJustCreated) return true;
-            return [...modifiedBaseNames].some(name => l.includes(name));
-          })
-          .slice(0, 20)
-          .join("\n")
-          .trim();
+          .filter(l => l.includes("error TS") || (l.includes(": error") && l.includes(".ts")))
+          .slice(0, 25);
+
+        // Split into "your errors" (in files you wrote) vs "pre-existing errors" so the
+        // coder knows what's urgent vs what's a carry-over from a prior subtask.
+        const myErrors = allTscErrors.filter(l => [...modifiedBaseNames].some(n => l.includes(n)));
+        const otherErrors = allTscErrors.filter(l => !myErrors.includes(l));
+
+        const tscErrors = allTscErrors.join("\n").trim();
 
         if (tscErrors) {
           const newRetryCount = (state.coderRetryCount ?? 0) + 1;
@@ -2139,18 +2155,81 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
           const capWarning = atCap
             ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL TypeScript errors in this response.`
             : "";
+
+          const myErrorsSection = myErrors.length > 0
+            ? `\nErrors in files YOU wrote this subtask (fix these first):\n${myErrors.join("\n")}`
+            : "";
+          const otherErrorsSection = otherErrors.length > 0
+            ? `\nErrors in files from earlier subtasks (fix these too — they block npm run build):\n${otherErrors.join("\n")}`
+            : "";
+
           return {
             verifierFeedback: "FAIL",
             coderRetryCount: newRetryCount,
             messages: [{
               role: "user",
-              content: `[VERIFIER AUTOMATED FEEDBACK — TYPESCRIPT ERRORS]\n\nThe TypeScript compiler found errors in the files you wrote:\n\n${tscErrors}\n\nFix all TypeScript errors before this subtask can pass. Common causes:\n- Wrong type for a variable or parameter\n- Calling a function with wrong argument types\n- Importing a type that doesn't exist\n- Missing required properties in an object literal\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
+              content: `[VERIFIER AUTOMATED FEEDBACK — TYPESCRIPT ERRORS]\n\nThe TypeScript compiler found errors. ALL must be fixed before this subtask can pass.${myErrorsSection}${otherErrorsSection}\n\nCommon causes: unused imports, wrong parameter types, missing type annotations, dead code.\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
             }],
           };
         }
       }
     } catch (tscCheckErr) {
       log(colors.dim(`  [Verifier] TypeScript check skipped: ${tscCheckErr.message?.slice(0, 80)}`));
+    }
+  }
+
+  // Build gate: run `npm run build` for TypeScript/Vite projects.
+  // Catches bundling errors, import path issues, and missing exports that tsc --noEmit misses.
+  // Runs only when: package.json exists AND build script calls tsc or vite build.
+  // Skipped on early subtasks (index < 3) to avoid blocking scaffolding.
+  const subtaskIndex = state.currentSubtaskIndex ?? 0;
+  if (state.projectDir && subtaskIndex >= 3) {
+    try {
+      const pkgPath = path.join(state.projectDir, "package.json");
+      const pkgRaw = await fs.promises.readFile(pkgPath, "utf8").catch(() => null);
+      if (pkgRaw) {
+        const pkg = JSON.parse(pkgRaw);
+        const buildScript = pkg.scripts?.build || "";
+        const isTsOrViteBuild = /\btsc\b|\bvite build\b/.test(buildScript);
+        if (isTsOrViteBuild) {
+          log(colors.dim("  [Verifier] Running npm run build to verify no compile/bundle errors..."));
+          const buildResult = await execAsync("npm run build 2>&1", {
+            cwd: state.projectDir,
+            timeout: 120000,
+          }).catch((e) => ({ stdout: e.stdout || e.message || "", status: 1 }));
+          const buildOutput = (buildResult.stdout || "").trim();
+          const buildFailed = buildResult.status !== 0;
+          if (buildFailed) {
+            // Surface only the most relevant error lines (skip progress/verbose output)
+            const errorLines = buildOutput
+              .split("\n")
+              .filter(l => /error|Error|failed|FAILED|✗|×/.test(l) && !/^>/.test(l))
+              .slice(0, 20)
+              .join("\n")
+              .trim() || buildOutput.slice(-1500);
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            log(colors.red(`  [Verifier] Build failed. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
+            eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: npm run build failed`, type: "warning" });
+            await archiveAndRevert(state);
+            const atCap = newRetryCount >= effectiveMaxRetries;
+            const capWarning = atCap
+              ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL build errors.`
+              : "";
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — BUILD FAILED]\n\nnpm run build failed. The project must build cleanly before this subtask can pass.\n\nBuild errors:\n${errorLines}\n\nFix all errors. Check for: TypeScript type mismatches, missing exports, wrong import paths, unused variables with noUnusedLocals enabled.\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
+              }],
+            };
+          } else {
+            log(colors.green("  [Verifier] Build passed ✓"));
+          }
+        }
+      }
+    } catch (buildCheckErr) {
+      log(colors.dim(`  [Verifier] Build gate skipped: ${buildCheckErr.message?.slice(0, 80)}`));
     }
   }
 

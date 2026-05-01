@@ -97,6 +97,41 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
     );
   }
 
+  // Hazard: React useEffect + setState + setTimeout — the timer-cancellation trap.
+  // This is the #1 cause of broken AI opponents and async game state in React games.
+  // Fires whenever the task involves React (.tsx/.jsx) and game/AI/opponent patterns.
+  const isGameTask = /game|chess|board|ai|opponent|player|turn|move/i.test(taskAndFiles);
+  if (isReactTask && isGameTask) {
+    hazards.push(
+      `⚠️ REACT GAME HAZARD — useEffect + setState + setTimeout TIMER-CANCELLATION TRAP\n` +
+      `The MOST common cause of AI opponents not responding:\n\n` +
+      `BROKEN PATTERN (AI never moves):\n` +
+      `  useEffect(() => {\n` +
+      `    if (isAIPlaying) return;\n` +
+      `    setIsAIPlaying(true);          // ← setState TRIGGERS CLEANUP!\n` +
+      `    const t = setTimeout(() => {   // ← this timer gets CANCELLED by cleanup\n` +
+      `      applyAIMove(); setIsAIPlaying(false);\n` +
+      `    }, 300);\n` +
+      `    return () => clearTimeout(t);  // ← cleanup cancels t when setIsAIPlaying re-renders\n` +
+      `  }, [gameState, isAIPlaying]);\n\n` +
+      `WHY IT BREAKS: setIsAIPlaying(true) causes a re-render → React runs cleanup\n` +
+      `(clearTimeout) → re-runs effect → isAIPlaying is now true → early return.\n` +
+      `Timer is cancelled before it fires. AI never moves.\n\n` +
+      `CORRECT PATTERN — use useRef for the semaphore (refs don't trigger cleanup):\n` +
+      `  const aiTriggerRef = useRef(false);\n` +
+      `  useEffect(() => {\n` +
+      `    if (currentTurn !== 'black' || aiTriggerRef.current) return;\n` +
+      `    aiTriggerRef.current = true;\n` +
+      `    const t = setTimeout(() => {\n` +
+      `      setGameState(s => { const move = getAIMove(s); return move ? applyMove(s, move) : s; });\n` +
+      `      aiTriggerRef.current = false;\n` +
+      `    }, 300);\n` +
+      `    return () => clearTimeout(t);\n` +
+      `  }, [currentTurn]);\n\n` +
+      `ALSO: Use functional setState (s => ...) inside setTimeout to avoid stale closures.`,
+    );
+  }
+
   // General hazard: test/REVIEW subtasks must NOT write files
   if (/^(REVIEW|LOCATE|FIND|IDENTIFY|INVESTIGATE|ACCEPTANCE TEST):/i.test(currentTask.trim())) {
     hazards.push(
