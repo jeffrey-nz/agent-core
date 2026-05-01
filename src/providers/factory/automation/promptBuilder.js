@@ -65,16 +65,16 @@ You MUST interact with the filesystem exclusively via the JSON tool call format 
 Do NOT output raw text file contents. Only use JSON tool calls.
 
 AVAILABLE TOOLS (use these exact names):
-- read_file       : { "tool": "read_file", "path": "/abs/path" }
-- list_dir        : { "tool": "list_dir", "path": "/abs/path" }
-- find_file       : { "tool": "find_file", "name": "*.php" } or { "tool": "find_file", "path": "/abs/dir" } (name optional — omit to list all files in path)
-- write_file      : { "tool": "write_file", "path": "/abs/path", "content": "..." }
-- patch_file      : { "tool": "patch_file", "path": "/abs/path", "search_block": "old", "replace_block": "new" }
+- read_file       : { "tool": "read_file", "path": "${rootDir}/src/filename.ts" }
+- list_dir        : { "tool": "list_dir", "path": "${rootDir}/src" }
+- find_file       : { "tool": "find_file", "name": "*.ts" } or { "tool": "find_file", "path": "${rootDir}/src" } (name optional — omit to list all files in path)
+- write_file      : { "tool": "write_file", "path": "${rootDir}/src/filename.ts", "content": "..." }
+- patch_file      : { "tool": "patch_file", "path": "${rootDir}/src/filename.ts", "search_block": "old", "replace_block": "new" }
 - apply_diff      : { "tool": "apply_diff", "diff_content": "--- a/rel/path\n+++ b/rel/path\n@@ ... @@\n-old\n+new" }
-- delete_file     : { "tool": "delete_file", "path": "/abs/path" }
+- delete_file     : { "tool": "delete_file", "path": "${rootDir}/src/filename.ts" }
 - execute_bash    : { "tool": "execute_bash", "command": "..." }
-- grep            : { "tool": "grep", "pattern": "...", "path": "/abs/path" }
-- outline_file    : { "tool": "outline_file", "path": "/abs/path" }
+- grep            : { "tool": "grep", "pattern": "...", "path": "${rootDir}/src" }
+- outline_file    : { "tool": "outline_file", "path": "${rootDir}/src/filename.ts" }
 ${diagnosticsTool}- http_request    : { "tool": "http_request", "url": "...", "method": "GET" }
 - run_composer    : { "tool": "run_composer", "command": "update -W" }
 - run_phpunit     : { "tool": "run_phpunit" }
@@ -91,18 +91,20 @@ ${diagnosticsTool}- http_request    : { "tool": "http_request", "url": "...", "m
 TOOL CALL FORMAT — output ALL calls in ONE single JSON array (never split into multiple arrays or code blocks):
 [
   { "tool": "list_dir", "path": "${rootDir}" },
-  { "tool": "read_file", "path": "/abs/path/to/file.ext" }
+  { "tool": "read_file", "path": "${rootDir}/src/filename.ts" }
 ]
 CRITICAL: Every tool call in your response MUST be inside this single array. Do NOT wrap in markdown code fences. Do NOT output separate arrays.
 
 CRITICAL RULES:
 - ${pathsRule}
-- Always read a file before editing it
+- Always read a file before editing it (unless this is a NEW PROJECT task — see below)
 - NEVER use write_file, patch_file, apply_diff, delete_file, or move_file on any path containing vendor/, node_modules/, or .git/
 ${diagnosticsRule}
 ${dirTree ? `DIRECTORY LISTING:\n${dirTree}` : ""}
 
-Start with \`list_dir\` or \`read_file\` to understand the codebase before making changes.`;
+${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
+  ? "This is a NEW PROJECT task — start IMMEDIATELY with write_file to create the file. Do NOT list_dir or read_file first. There is nothing to read — create the file now."
+  : "Start with `list_dir` or `read_file` to understand the codebase before making changes."}`;
         }
       }
 

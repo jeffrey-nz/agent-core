@@ -79,6 +79,24 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
     }
   }
 
+  // Hazard: TypeScript verbatimModuleSyntax — type-only imports required
+  // Modern Vite/React tsconfigs have "verbatimModuleSyntax": true which requires
+  // types to be imported with `import type { ... }`, not regular `import { ... }`.
+  // This is a very common error in AI-generated TypeScript code.
+  if (projectType !== "swift" && /\.(ts|tsx)$/i.test(taskAndNote)) {
+    hazards.push(
+      `⚠️ TYPESCRIPT HAZARD — USE import type FOR TYPE-ONLY IMPORTS\n` +
+      `This project uses "verbatimModuleSyntax": true in tsconfig which REQUIRES:\n` +
+      `  WRONG: import { Board, Position, Move } from './types';\n` +
+      `  RIGHT: import type { Board, Position, Move } from './types';\n` +
+      `Rule: if you import ONLY type aliases, interfaces, or type parameters — use import type.\n` +
+      `If a module exports both values AND types, split into separate import statements:\n` +
+      `  import { GameState } from './GameState';     // class — value import\n` +
+      `  import type { Move, Position } from './types'; // types — type import\n` +
+      `Failing to use import type causes TS1484 errors that will be caught by the verifier.`,
+    );
+  }
+
   // General hazard: test/REVIEW subtasks must NOT write files
   if (/^(REVIEW|LOCATE|FIND|IDENTIFY|INVESTIGATE|ACCEPTANCE TEST):/i.test(currentTask.trim())) {
     hazards.push(
@@ -290,6 +308,51 @@ export async function coderNode(state, config) {
   const constraintsSection = state.projectConstraints
     ? `\n${state.projectConstraints}\n`
     : "";
+
+  // For new_project tasks: reinforce that all files must be CREATED, not found.
+  // Also inject a concrete first-write target so the coder doesn't spend turns
+  // reading existing project files (package.json etc.) before writing.
+  let newProjectSection = "";
+  if (state.taskType === "new_project") {
+    const firstPlannedFile = currentSubtask?.files?.[0];
+    const firstWriteTarget = firstPlannedFile
+      ? (path.isAbsolute(firstPlannedFile) ? firstPlannedFile : path.join(state.projectDir, firstPlannedFile))
+      : null;
+    const firstWriteHint = firstWriteTarget
+      ? `\n⚡ FIRST ACTION: Your very first tool call MUST be:\n` +
+        `[{ "tool": "write_file", "path": "${firstWriteTarget}", "content": "...full file content..." }]\n` +
+        `Do NOT call list_dir, read_file, or any other tool before this write_file.\n`
+      : "";
+
+    // Inject key project config files so the coder doesn't need to read them
+    let injectedConfigs = "";
+    if (state.projectDir) {
+      const configFiles = ["package.json", "tsconfig.app.json", "tsconfig.json", "vite.config.ts", "vite.config.js"];
+      const snippets = [];
+      for (const cf of configFiles) {
+        try {
+          const cfPath = path.join(state.projectDir, cf);
+          const content = await readFile(cfPath, "utf8");
+          // Only inject small config files (< 2000 chars) to avoid bloating the prompt
+          if (content.length < 2000) {
+            snippets.push(`// ${cf}\n${content.slice(0, 1500)}`);
+          }
+        } catch { /* file doesn't exist — skip */ }
+        if (snippets.length >= 2) break; // max 2 config files
+      }
+      if (snippets.length > 0) {
+        injectedConfigs = `\n[PROJECT CONFIG — already on disk, do NOT read_file these]\n${snippets.join("\n\n")}\n`;
+      }
+    }
+
+    newProjectSection =
+      `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
+      `- Every file in this subtask must be CREATED with write_file — there is no existing code to patch.\n` +
+      `- If a file already exists (e.g. App.tsx with Vite defaults), REPLACE it entirely with write_file.\n` +
+      `- Do NOT output prose descriptions of what you would write — use actual write_file tool calls.\n` +
+      `- After creating files, run npm run build (or equivalent) to verify there are no compile errors.\n` +
+      firstWriteHint + injectedConfigs;
+  }
 
   const coderDirective = buildCoderDirective(state.projectType);
 
@@ -570,7 +633,7 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
 
   const systemPrompt = `You are an expert Software Engineer.
 Your job is ONLY to implement the current assigned SUBTASK.
-${constraintsSection}
+${constraintsSection}${newProjectSection}
 [OVERALL EXECUTION PLAN]
 ${state.executionPlan}
 ${progressNote}${allModifiedFilesNote}

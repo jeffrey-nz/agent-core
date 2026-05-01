@@ -242,6 +242,12 @@ export async function runAutomationAgentLoop({
 
     if (!parsed.hasActivity && isWritePhase(state.phase)) {
       if (parsed.parseError) {
+        // If we already wrote a file, the model is likely summarizing its work rather than
+        // issuing more tool calls. Exit cleanly — no need to burn retries on a done subtask.
+        if (state.madeProgress) {
+          break;
+        }
+
         consecutiveParseErrors++;
         if (consecutiveParseErrors > MAX_PARSE_ERROR_RETRIES) {
           // Give up — repeated attempts to produce valid JSON have failed.
@@ -251,6 +257,8 @@ export async function runAutomationAgentLoop({
         // Choose a hint that matches what actually went wrong.
         const rawText = String(state.responseText || "");
         const isReadOnly = state.toolContext?.readOnly;
+        const hasBracket = rawText.includes("[") && rawText.includes("]");
+        const looksLikeProse = !hasBracket && !rawText.includes("{");
         const looksLikeCode =
           !rawText.includes("{") ||
           rawText.trimStart().startsWith("//") ||
@@ -265,6 +273,12 @@ export async function runAutomationAgentLoop({
             `If you still have more files to read, respond with a JSON array of read-only tool calls:\n` +
             `\`\`\`json\n[\n  { "tool": "read_file", "path": "${state.rootDir}/src/filename.js" }\n]\n\`\`\`\n\n` +
             `Do NOT output prose — use \`\`\`json\n[]\n\`\`\` if done.`
+          : looksLikeProse
+          ? `Your response was plain text with no JSON. You MUST output ONLY a JSON array starting with [ and ending with ].\n\n` +
+            `If your subtask is complete, output:\n[\n  { "tool": "execute_bash", "command": "echo done" }\n]\n\n` +
+            `If you need to write a file, output:\n` +
+            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.ts", "content": "your content here" }\n]\n\n` +
+            `NEVER output explanatory prose. Respond with JSON only.`
           : looksLikeCode
           ? `Your response appears to be raw code or plain text rather than a JSON tool call array.\n\n` +
             `You MUST respond with a JSON array of tool objects, not raw code.\n` +
@@ -350,8 +364,16 @@ export async function runAutomationAgentLoop({
           rawText.trimStart().startsWith("class ") ||
           rawText.trimStart().startsWith("namespace ") ||
           rawText.trimStart().startsWith("import ") ||
+          rawText.trimStart().startsWith("export ") ||
+          rawText.trimStart().startsWith("interface ") ||
+          rawText.trimStart().startsWith("type ") ||
           rawText.trimStart().startsWith("//") ||
-          /^(private|protected|internal|static|override|virtual)\s/m.test(rawText);
+          rawText.trimStart().startsWith("/*") ||
+          /^(private|protected|internal|static|override|virtual)\s/m.test(rawText) ||
+          /^(export\s+)?(const|function|class)\s+[A-Z]/m.test(rawText) ||
+          /^(export\s+)?(type|interface)\s+\w/m.test(rawText) ||
+          // Long response (> 500 chars) with zero tool calls is almost certainly prose
+          (rawText.length > 500 && !rawText.includes("[{"));
 
         if (looksLikeProse) {
           consecutiveProse++;

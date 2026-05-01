@@ -412,6 +412,23 @@ ${failedTask}${capWarning}`,
     };
   }
 
+  // If modifiedFiles is empty, fall back to git status — the coder may have
+  // written files via execute_bash (heredoc, tee, etc.) rather than write_file.
+  if ((!state.modifiedFiles || state.modifiedFiles.length === 0) && state.projectDir) {
+    try {
+      const { stdout } = await execAsync("git status --porcelain", { cwd: state.projectDir });
+      if (stdout.trim()) {
+        const gitFiles = stdout
+          .trim()
+          .split("\n")
+          .map((line) => path.join(state.projectDir, line.slice(3).trim()))
+          .filter(Boolean);
+        log(colors.dim(`  [Verifier] Detected ${gitFiles.length} git-tracked change(s) from bash writes`));
+        state.modifiedFiles = gitFiles;
+      }
+    } catch {}
+  }
+
   if (!state.modifiedFiles || state.modifiedFiles.length === 0) {
     const currentTask =
       state.subtasks?.[state.currentSubtaskIndex]?.task ||
@@ -1961,6 +1978,70 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
     }
   }
 
+  // TypeScript compilation gate: for React/TypeScript projects, run tsc --noEmit to
+  // catch type errors in written .ts/.tsx files before accepting the subtask.
+  // Mirrors the Swift swiftc -typecheck gate so TypeScript gets the same static analysis.
+  const hasTsFiles = (state.modifiedFiles || []).some(f => /\.(ts|tsx)$/.test(f));
+  if (hasTsFiles && state.projectDir) {
+    try {
+      // Use the project's local tsc binary (from devDependencies) — faster than npx
+      const localTsc = path.join(state.projectDir, "node_modules/.bin/tsc");
+      const hasTsc = await fs.promises.access(localTsc).then(() => true).catch(() => false);
+
+      if (hasTsc) {
+        const tsconfigs = ["tsconfig.app.json", "tsconfig.json"];
+        let tsconfigFlag = "";
+        for (const tc of tsconfigs) {
+          try {
+            await fs.promises.access(path.join(state.projectDir, tc));
+            tsconfigFlag = `-p ${tc}`;
+            break;
+          } catch { /* not found */ }
+        }
+
+        const tscResult = await execAsync(
+          `"${localTsc}" --noEmit ${tsconfigFlag} 2>&1 || true`,
+          { cwd: state.projectDir },
+        ).catch((e) => ({ stdout: e.stdout || "", stderr: e.stderr || "", status: 1 }));
+
+        const tscOutput = (tscResult.stdout || "").trim();
+        // Only surface errors in files that were just written — pre-existing errors in
+        // other subtasks' files would unfairly block an unrelated subtask.
+        const modifiedBaseNames = new Set((state.modifiedFiles || []).map(f => path.basename(f)));
+        const tscErrors = tscOutput
+          .split("\n")
+          .filter(l => {
+            if (!l.includes("error TS") && !(l.includes(": error") && l.includes(".ts"))) return false;
+            return [...modifiedBaseNames].some(name => l.includes(name));
+          })
+          .slice(0, 20)
+          .join("\n")
+          .trim();
+
+        if (tscErrors) {
+          const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+          log(colors.red(`  [Graph] -> TypeScript typecheck found errors. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
+          eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: compilation/syntax errors - reverting and retrying`, type: "warning" });
+          await archiveAndRevert(state);
+          const atCap = newRetryCount >= effectiveMaxRetries;
+          const capWarning = atCap
+            ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL TypeScript errors in this response.`
+            : "";
+          return {
+            verifierFeedback: "FAIL",
+            coderRetryCount: newRetryCount,
+            messages: [{
+              role: "user",
+              content: `[VERIFIER AUTOMATED FEEDBACK — TYPESCRIPT ERRORS]\n\nThe TypeScript compiler found errors in the files you wrote:\n\n${tscErrors}\n\nFix all TypeScript errors before this subtask can pass. Common causes:\n- Wrong type for a variable or parameter\n- Calling a function with wrong argument types\n- Importing a type that doesn't exist\n- Missing required properties in an object literal\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
+            }],
+          };
+        }
+      }
+    } catch (tscCheckErr) {
+      log(colors.dim(`  [Verifier] TypeScript check skipped: ${tscCheckErr.message?.slice(0, 80)}`));
+    }
+  }
+
   // Stub detection gate: catches implementation files that contain return-nothing stubs
   // such as `return []`, `return false`, `return null` in named functions — the classic
   // anti-pattern where the coder scaffolds the shape but leaves logic empty.
@@ -1989,12 +2070,36 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
             break;
           }
         }
+
+        // Extra check: function where ALL parameters are _-prefixed (all inputs ignored)
+        // combined with a body that only returns a constant — definite stub.
+        // Catches the pattern: function isLegalMove(_board, _from, _to, ...) { return true; }
+        if (!stubsFound.some(s => s.file === path.basename(filePath))) {
+          const funcRegex = /(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(([^)]+)\)\s*(?::[^{]+)?\s*\{([^}]{0,500})\}/gs;
+          let funcMatch;
+          while ((funcMatch = funcRegex.exec(content)) !== null) {
+            const params = funcMatch[1];
+            const body = funcMatch[2];
+            // Check all parameter names start with _
+            const paramNames = params.split(",")
+              .map(p => p.trim().split(/[\s:=<(]/)[0].replace(/^\.\.\./,"").trim())
+              .filter(Boolean);
+            const allIgnored = paramNames.length >= 2 && paramNames.every(p => p.startsWith("_"));
+            // Check body only returns a constant (true/false/null/0/"")
+            const bodyTrimmed = body.replace(/\/\/[^\n]*/g, "").replace(/\s+/g, " ").trim();
+            const onlyReturnsConstant = /^(?:if\s*\([^)]+\)\s*\{[^}]*return\s+(?:true|false|null|0|""|'');?\s*\}\s*)?return\s+(?:true|false|null|0|""|'');\s*$/.test(bodyTrimmed);
+            if (allIgnored && onlyReturnsConstant) {
+              stubsFound.push({ file: path.basename(filePath), pattern: "all parameters _-prefixed + body returns constant (all inputs ignored)" });
+              break;
+            }
+          }
+        }
       } catch {
         // file unreadable — skip
       }
     }
     if (stubsFound.length > 0) {
-      const stubList = stubsFound.map(s => `  - ${s.file}: matched /${s.pattern.slice(0,50)}/`).join("\n");
+      const stubList = stubsFound.map(s => `  - ${s.file}: matched /${s.pattern.slice(0,80)}/`).join("\n");
       const newRetryCount = (state.coderRetryCount ?? 0) + 1;
       log(colors.red(`  [Graph] -> Stub detection gate FAILED: ${stubsFound.length} stub(s) found.`));
       return {
@@ -2003,18 +2108,19 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
         messages: [{
           role: "user",
           content: `[VERIFIER STUB DETECTION]
-The following files contain stub implementations — functions that return empty arrays, false, or null without any real logic:
+The following files contain stub implementations — functions that return empty arrays, false, null, or a constant boolean without any real logic:
 
 ${stubList}
 
 This violates the ANTI-STUB RULE. You MUST replace each stub with a real implementation.
 
 Examples of stubs that were detected:
-  - function getLegalMoves(piece, board) { return []; }   ← STUB — no moves calculated
-  - const isCheck = () => false;                          ← STUB — always returns false
-  - function validate() { return null; }                  ← STUB — no validation
+  - function getLegalMoves(piece, board) { return []; }                        ← STUB — no moves calculated
+  - const isCheck = () => false;                                               ← STUB — always returns false
+  - function validate() { return null; }                                       ← STUB — no validation
+  - function isLegalMove(_board, _from, _to, ...) { return true; }            ← STUB — all inputs ignored
 
-Fix: implement the actual logic. The function body must contain real computation, not just a bare return of [] / false / null.`,
+Fix: implement the actual logic. The function body must contain real computation, not just a bare return of [] / false / null / true.`,
         }],
       };
     }
