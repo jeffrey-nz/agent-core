@@ -52,9 +52,10 @@ export async function captureWebScreenshot(url) {
     return null;
   }
 
-  if (!data?.data?.screenshotBase64) return null;
+  // sendSuccess spreads fields flat: { success, screenshotBase64, url, timestamp }
+  if (!data?.screenshotBase64) return null;
 
-  const { screenshotBase64 } = data.data;
+  const { screenshotBase64 } = data;
 
   // Save to ./screenshots/<timestamp>-smoke.png
   const ts = new Date().toISOString().replace(/[:.]/g, "-");

@@ -67,7 +67,8 @@ export async function checkVisualVerify(projectDir, devServerResult) {
       return [];
     }
     const data = await resp.json();
-    screenshotBase64 = data?.data?.screenshotBase64;
+    // /api/screenshot uses sendSuccess which spreads fields flat: { success, screenshotBase64, url, timestamp }
+    screenshotBase64 = data?.screenshotBase64;
     if (!screenshotBase64) {
       log(colors.dim("  [VisualVerify] No screenshot data in response — skipping"));
       return [];

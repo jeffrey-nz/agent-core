@@ -63,7 +63,8 @@ export async function startDevServer(projectDir) {
     }
 
     const data = await resp.json();
-    const { pid, url } = data.data;
+    // sendSuccess spreads fields flat: { success, pid, url, ready }
+    const { pid, url } = data;
     log(colors.green(`  [DevServer] Running at ${url} (pid ${pid})`));
     return { pid, url };
   } catch (err) {
