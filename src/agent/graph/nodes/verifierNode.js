@@ -2189,10 +2189,12 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
       const pkgPath = path.join(state.projectDir, "package.json");
       const pkgRaw = await fs.promises.readFile(pkgPath, "utf8").catch(() => null);
 
-      // Detect Vite/React project by presence of vite.config.ts (even if package.json is absent).
+      // Detect Vite/React project. Check multiple signals — vite.config.ts may also be missing
+      // if the scaffold partially failed, so fall back to src/main.tsx or src/*.tsx presence.
       const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts")).then(() => true).catch(() => false);
+      const hasMainTsx = await fs.promises.access(path.join(state.projectDir, "src/main.tsx")).then(() => true).catch(() => false);
       const hasSrcDir = await fs.promises.access(path.join(state.projectDir, "src")).then(() => true).catch(() => false);
-      const isViteProject = hasViteConfig && hasSrcDir;
+      const isViteProject = (hasViteConfig || hasMainTsx) && hasSrcDir;
 
       // package.json missing entirely — scaffold failed to commit it.
       if (!pkgRaw && isViteProject) {
