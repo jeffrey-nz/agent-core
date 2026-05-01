@@ -572,10 +572,10 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
       failureClassification =
         `FAILURE TYPE: STALL — your previous turn output PROSE instead of tool calls.\n` +
         `The pipeline discarded your text response. No files were written. The task has not progressed.\n\n` +
-        `ROOT CAUSE: You wrote C# code (or explanatory text) as markdown/plain text in your response.\n` +
+        `ROOT CAUSE: You wrote code or explanatory text as markdown/plain text in your response.\n` +
         `Prose output is INVISIBLE to the file system — it is discarded immediately after your turn ends.\n\n` +
         `REQUIRED ACTION: Your FIRST token must begin a JSON tool call array:\n` +
-        `[\n  { "tool": "write_file", "path": "/abs/path/file.cs", "content": "using UnityEngine;\\n..." }\n]\n` +
+        `[\n  { "tool": "write_file", "path": "/abs/path/file.ts", "content": "export function..." }\n]\n` +
         `Do NOT output any text before "[". Start the JSON array immediately.`;
     } else {
       failureClassification = "FAILURE TYPE: No files written or execution tool not called - execute the required change immediately.";
@@ -861,7 +861,9 @@ ${buildAcceptanceTestDirective(state.projectType)}
         /^\s{2,}\w+:/m.test(fullText) ||       // indented YAML key
         /^\s*(class|function|public|private|protected|namespace|use|import|require)\s/m.test(fullText) ||
         /^<\?php\b/m.test(fullText) ||         // PHP open tag
-        /^<%-?\s*(if|loop|with)\b/m.test(fullText); // SS template tag
+        /^<%-?\s*(if|loop|with)\b/m.test(fullText) || // SS template tag
+        /^[.#]?[\w-]+\s*\{[\s\S]*?[\w-]+\s*:/m.test(fullText) || // CSS rule block
+        /^\s+[\w-]+\s*:\s+[^;{]+;/m.test(fullText); // CSS property declaration
 
       if (looksLikeFileContent) {
         log(colors.yellow(
