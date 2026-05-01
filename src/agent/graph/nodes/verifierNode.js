@@ -584,6 +584,29 @@ ${failedTask}${capWarning}`,
           })
         );
         if (cssExistResults.some(Boolean)) {
+          // Guard: don't auto-pass the scaffold subtask if critical config files are missing.
+          // The scaffold must create package.json, vite.config.ts, index.html, etc. in one pass.
+          const isScaffoldSubtask = (state.currentSubtaskIndex ?? 0) <= 1;
+          if (isScaffoldSubtask && state.projectDir) {
+            const missingCritical = [];
+            const criticalFiles = ["package.json", "vite.config.ts", "index.html", "tsconfig.json"];
+            for (const f of criticalFiles) {
+              const exists = await fs.promises.access(path.join(state.projectDir, f)).then(() => true).catch(() => false);
+              if (!exists) missingCritical.push(f);
+            }
+            if (missingCritical.length > 0) {
+              const newRetry = (state.coderRetryCount ?? 0) + 1;
+              log(colors.yellow(`  [Graph] -> CSS/JSX pass blocked: scaffold missing critical files: ${missingCritical.join(", ")}`));
+              return {
+                verifierFeedback: "FAIL",
+                coderRetryCount: newRetry,
+                messages: [{
+                  role: "user",
+                  content: `[VERIFIER SCAFFOLD COMPLETENESS CHECK]\n\nCSS class names look consistent, but the scaffold is incomplete. The following critical config files are MISSING from ${state.projectDir}:\n${missingCritical.map(f => `  • ${f}`).join("\n")}\n\nYou MUST create ALL of these files before this subtask can pass:\n• package.json — with name, scripts (dev/build/preview), dependencies (react, react-dom), devDependencies (vite, typescript, @vitejs/plugin-react)\n• vite.config.ts — with React plugin configured\n• index.html — entry point HTML file\n• tsconfig.json — TypeScript config for React\n\nCreate them all in a single response (multiple write_file calls), then run npm install.`,
+                }],
+              };
+            }
+          }
           log(colors.green("  [Graph] -> CSS/JSX consistency verified — JSX read + CSS already on disk. Passing."));
           eventBus.emit("system_message", { text: `✓ CSS/JSX consistency verified: ${currentTask.slice(0, 80)}`, type: "info" });
           emitTaskCompleted(state);

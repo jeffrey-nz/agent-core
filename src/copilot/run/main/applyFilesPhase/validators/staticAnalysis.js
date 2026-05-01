@@ -17,11 +17,22 @@ export async function checkStaticAnalysis(
     const hasTsconfigApp = await fileExists(tsconfigApp);
     const hasTsconfigRoot = await fileExists(tsconfigRoot);
     if (hasTsconfigApp || hasTsconfigRoot) {
-      log(colors.dim("  [Verifier] Running TypeScript compiler check..."));
-      const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
-      const res = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: projectDir });
-      if (res.status !== 0)
-        errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+      // Skip TypeScript check if node_modules isn't populated — npm install may not have
+      // completed yet (timed out or in progress). Running tsc without packages installed
+      // produces false "cannot find module 'react'" errors that revert good code.
+      const nodeModulesExists = await fileExists(path.join(projectDir, "node_modules"));
+      const hasLocalTsc = await fileExists(path.join(projectDir, "node_modules", ".bin", "tsc"));
+      const hasReactTypes = await fileExists(path.join(projectDir, "node_modules", "@types", "react"));
+      const packagesReady = nodeModulesExists && (hasLocalTsc || hasReactTypes);
+      if (!packagesReady) {
+        log(colors.dim("  [Verifier] Skipping TypeScript check — node_modules not populated yet (npm install may still be in progress)."));
+      } else {
+        log(colors.dim("  [Verifier] Running TypeScript compiler check..."));
+        const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
+        const res = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: projectDir });
+        if (res.status !== 0)
+          errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+      }
     }
   }
 
