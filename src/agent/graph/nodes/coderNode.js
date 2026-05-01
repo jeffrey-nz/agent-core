@@ -100,8 +100,10 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
   // Hazard: React useEffect + setState + setTimeout — the timer-cancellation trap.
   // This is the #1 cause of broken AI opponents and async game state in React games.
   // Fires whenever the task involves React (.tsx/.jsx) and game/AI/opponent patterns.
+  const taskAndFiles = `${taskAndNote} ${(currentSubtask?.files || []).join(" ")}`;
   const isGameTask = /game|chess|board|ai|opponent|player|turn|move/i.test(taskAndFiles);
-  if (isReactTask && isGameTask) {
+  const isReactFileTask = /\.(jsx|tsx)$|react|vite/i.test(taskAndFiles);
+  if (isReactFileTask && isGameTask) {
     hazards.push(
       `⚠️ REACT GAME HAZARD — useEffect + setState + setTimeout TIMER-CANCELLATION TRAP\n` +
       `The MOST common cause of AI opponents not responding:\n\n` +
