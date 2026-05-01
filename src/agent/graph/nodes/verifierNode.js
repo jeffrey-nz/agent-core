@@ -2181,6 +2181,7 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
   // Build gate: run `npm run build` for TypeScript/Vite projects.
   // Catches bundling errors, import path issues, and missing exports that tsc --noEmit misses.
   // Runs only when: package.json exists AND build script calls tsc or vite build.
+  // Also catches broken package.json (missing scripts) when vite.config.ts is present.
   // Skipped on early subtasks (index < 3) to avoid blocking scaffolding.
   const subtaskIndex = state.currentSubtaskIndex ?? 0;
   if (state.projectDir && subtaskIndex >= 3) {
@@ -2191,6 +2192,34 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
         const pkg = JSON.parse(pkgRaw);
         const buildScript = pkg.scripts?.build || "";
         const isTsOrViteBuild = /\btsc\b|\bvite build\b/.test(buildScript);
+
+        // Detect corrupted package.json: vite.config.ts present but no build script.
+        // This happens when the coder repeatedly rewrites package.json and loses the scripts section.
+        const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts")).then(() => true).catch(() => false);
+        const hasSrcDir = await fs.promises.access(path.join(state.projectDir, "src")).then(() => true).catch(() => false);
+        const isViteProject = hasViteConfig && hasSrcDir;
+        const isMissingBuildScript = !pkg.scripts?.build;
+        const isMissingReactDeps = isViteProject && !pkg.dependencies?.react && !pkg.devDependencies?.react;
+        if (isViteProject && (isMissingBuildScript || isMissingReactDeps)) {
+          const missingFields = [];
+          if (isMissingBuildScript) missingFields.push('scripts.build (e.g. "vite build")');
+          if (isMissingReactDeps) missingFields.push('dependencies.react and dependencies.react-dom');
+          const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+          log(colors.red(`  [Verifier] Corrupted package.json detected — missing: ${missingFields.join(", ")}. Retry ${newRetryCount}.`));
+          eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: package.json is missing required fields`, type: "warning" });
+          await archiveAndRevert(state);
+          const atCap = newRetryCount >= effectiveMaxRetries;
+          const capWarning = atCap ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL issues.` : "";
+          return {
+            verifierFeedback: "FAIL",
+            coderRetryCount: newRetryCount,
+            messages: [{
+              role: "user",
+              content: `[VERIFIER AUTOMATED FEEDBACK — BROKEN PACKAGE.JSON]\n\nThis is a Vite/React project (vite.config.ts exists) but package.json is missing required fields:\n${missingFields.map(f => `  • ${f}`).join("\n")}\n\nThe package.json has been REVERTED to the last good version. Read package.json with read_file to see its current state, then add ONLY the missing fields using patch_file.\n\nDo NOT rewrite package.json from scratch — read it first, then patch only what is missing.\n\nRequired package.json structure for a Vite/React project:\n{\n  "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },\n  "dependencies": { "react": "^18.2.0", "react-dom": "^18.2.0" },\n  "devDependencies": { "@vitejs/plugin-react": "...", "vite": "...", "typescript": "..." }\n}\n\nCURRENT SUBTASK:\n${currentTask}${capWarning}`,
+            }],
+          };
+        }
+
         if (isTsOrViteBuild) {
           log(colors.dim("  [Verifier] Running npm run build to verify no compile/bundle errors..."));
           const buildResult = await execAsync("npm run build 2>&1", {

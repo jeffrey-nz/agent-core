@@ -134,6 +134,25 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
     );
   }
 
+  // Hazard: package.json rewriting — the #1 cause of project corruption.
+  // When the coder tries to fix build failures, it tends to rewrite package.json from memory,
+  // losing the scripts section, react dependencies, or vite config. Always read first, patch minimally.
+  const touchesPackageJson = (currentSubtask?.files || []).some(f => f.includes("package.json"))
+    || /package\.json|npm install|dependencies|build.*fail/i.test(taskAndNote);
+  if (touchesPackageJson) {
+    hazards.push(
+      `⚠️ PACKAGE.JSON HAZARD — Never rewrite package.json without reading it first!\n` +
+      `RULE 1: Always call read_file on package.json BEFORE writing it.\n` +
+      `RULE 2: Use patch_file to add ONLY the missing field, not write_file to replace the whole thing.\n` +
+      `RULE 3: Never reduce package.json to just { "devDependencies": {...} } — that is corruption.\n` +
+      `RULE 4: A valid React/Vite package.json MUST have ALL of these sections:\n` +
+      `  { "scripts": { "dev": "vite", "build": "vite build" },\n` +
+      `    "dependencies": { "react": "...", "react-dom": "..." },\n` +
+      `    "devDependencies": { "@vitejs/plugin-react": "...", "vite": "...", "typescript": "..." } }\n` +
+      `WHEN BUILD FAILS: Read the actual TypeScript errors (npm run build 2>&1), fix the TS code — do NOT fix by deleting scripts from package.json.`,
+    );
+  }
+
   // General hazard: test/REVIEW subtasks must NOT write files
   if (/^(REVIEW|LOCATE|FIND|IDENTIFY|INVESTIGATE|ACCEPTANCE TEST):/i.test(currentTask.trim())) {
     hazards.push(
