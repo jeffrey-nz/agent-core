@@ -473,7 +473,8 @@ export async function runAutomationAgentLoop({
         const VALID_CODER_TOOLS = new Set([
           "write_file", "patch_file", "apply_diff", "delete_file", "move_file",
           "read_file", "list_dir", "find_file", "grep", "search_files", "outline_file",
-          "execute_bash", "run_sake", "run_composer", "http_request",
+          "execute_bash", "run_npm", "run_yarn", "run_pnpm",
+          "run_sake", "run_composer", "http_request",
         ]);
         const unknownTools = parsed.jsonToolCalls
           .map((tc) => (tc.tool || tc.name || "").toLowerCase())
@@ -486,14 +487,24 @@ export async function runAutomationAgentLoop({
             break;
           }
           log(colors.yellow(`  [Protocol] ${state.label}: coder used wrong tools (${unknownTools.join(", ")}) — redirecting to write_file (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
+
+          // Give a tool-specific hint if the unknown tool name suggests a common mistake.
+          const isShellLikeTool = unknownTools.some(t =>
+            /^(run_npm|run_yarn|run_pnpm|run_jest|run_mocha|npm|yarn|shell|bash_cmd|cmd|terminal|run_command|run_script|execute|exec_bash)$/.test(t)
+          );
+          const shellHint = isShellLikeTool
+            ? `\n\nFor running shell commands (npm install, npm test, etc.), use execute_bash:\n` +
+              `[\n  { "tool": "execute_bash", "command": "npm install" }\n]`
+            : `\n\nUse the REAL path of the file you need to create/modify (under ${state.rootDir}):\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]`;
+
           state.responseText = await state.send(
             state.remoteSessionId,
             `[WRONG TOOL — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
-              `You called "${unknownTools.join('", "')}" which is not a valid coder tool. ` +
-              `This is a code-writing phase — you MUST use write_file or patch_file to create or modify source files.\n\n` +
-              `Use the REAL path of the file you need to create/modify (under ${state.rootDir}):\n` +
-              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
-              `Do NOT use documentation or messaging tools. Write the actual source code files.`,
+              `You called "${unknownTools.join('", "')}" which is not a valid tool. ` +
+              `Valid tools are: write_file, patch_file, read_file, list_dir, find_file, grep, execute_bash, apply_diff, delete_file.` +
+              shellHint +
+              `\n\nDo NOT invent tool names. Use only the tools listed above.`,
             `${state.label} [wrong-tool ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
           );
           state.consecutiveNoActivity = 0;
