@@ -1598,11 +1598,18 @@ DEBUGGING STRATEGY:
     // even though none of the planned files were touched.
     if (Array.isArray(subtaskMetaEarly?.files) && subtaskMetaEarly.files.length > 0 && state.projectDir) {
       const missingPlannedFiles = [];
+      const untouchedPlannedFiles = [];
+      const modifiedSet = new Set((state.modifiedFiles || []).map(f => path.isAbsolute(f) ? f : path.join(state.projectDir, f)));
       for (const f of subtaskMetaEarly.files) {
         const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
         const exists = await fs.promises.access(abs).then(() => true).catch(() => false);
-        if (!exists) missingPlannedFiles.push(f);
+        if (!exists) {
+          missingPlannedFiles.push(f);
+        } else if (!modifiedSet.has(abs)) {
+          untouchedPlannedFiles.push(f);
+        }
       }
+      // FAIL if any planned files don't exist at all.
       if (missingPlannedFiles.length > 0) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(colors.red(`  [Graph] -> Planned-files gate FAILED: ${missingPlannedFiles.length} file(s) missing.`));
@@ -1612,6 +1619,22 @@ DEBUGGING STRATEGY:
           messages: [{
             role: "user",
             content: `[VERIFIER PLANNED FILES GATE]\n\nThe PM planned this subtask to write the following files, but they do not exist on disk:\n${missingPlannedFiles.map(f => `  - ${f}`).join("\n")}\n\nYou MUST use write_file to create each of these files with the actual implementation. Editing README.md, package.json, or vite.config.js does NOT satisfy this subtask — write the planned source files.`,
+          }],
+        };
+      }
+      // FAIL if all planned files exist but none were modified this subtask
+      // AND the coder did write some other files (state.modifiedFiles non-empty).
+      // This catches the "coder edits package.json instead of the planned source"
+      // pattern. Skip when modifiedFiles is empty (the no-files gate handles that).
+      if (untouchedPlannedFiles.length === subtaskMetaEarly.files.length && (state.modifiedFiles?.length ?? 0) > 0) {
+        const newRetry = (state.coderRetryCount ?? 0) + 1;
+        log(colors.red(`  [Graph] -> Planned-files gate FAILED: planned files exist but were not modified this subtask.`));
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetry,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER PLANNED FILES GATE]\n\nThe PM planned this subtask to modify the following files, but you didn't write to any of them this turn:\n${untouchedPlannedFiles.map(f => `  - ${f}`).join("\n")}\n\nYou modified other files (${(state.modifiedFiles || []).map(f => path.basename(f)).slice(0,5).join(", ")}) instead. You MUST use write_file or patch_file on the planned files to satisfy this subtask. Re-edit them with the actual implementation described in the subtask.`,
           }],
         };
       }
