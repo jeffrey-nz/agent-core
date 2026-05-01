@@ -38,9 +38,15 @@ export function isSafePath(rootDir, targetPath, allowedDirs = []) {
 
 export function isCompiledFile(targetPath) {
   if (!targetPath) return false;
-  const lower = targetPath.toLowerCase();
+  const lower = targetPath.replace(/\\/g, "/").toLowerCase();
+  // Blanket .css block was wrong — React/Vue/Vite source CSS is hand-written.
+  // Only block CSS that lives in build output dirs or is minified.
+  const isBuildDirCss =
+    /\.css$/.test(lower) &&
+    /(^|\/)(dist|build|public|out|\.next|\.nuxt|coverage)\//.test(lower);
   return (
-    lower.endsWith(".css") ||
+    isBuildDirCss ||
+    lower.endsWith(".min.css") ||
     lower.endsWith(".min.js") ||
     lower.endsWith(".bundle.js")
   );
