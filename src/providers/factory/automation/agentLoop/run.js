@@ -479,6 +479,10 @@ export async function runAutomationAgentLoop({
         const unknownTools = parsed.jsonToolCalls
           .map((tc) => (tc.tool || tc.name || "").toLowerCase())
           .filter((n) => n && !VALID_CODER_TOOLS.has(n));
+        if (unknownTools.length > 0 && unknownTools.length < parsed.jsonToolCalls.length) {
+          // Mixed: some valid + some invalid — valid tools will execute, invalid will fail at dispatcher
+          log(colors.yellow(`  [Protocol] ${state.label}: coder mixed valid and unknown tools (${unknownTools.join(", ")}) — unknown tools will be rejected by dispatcher.`));
+        }
         if (unknownTools.length > 0 && unknownTools.length === parsed.jsonToolCalls.length) {
           consecutiveProse++;
           if (consecutiveProse >= MAX_PROSE_RETRIES) {

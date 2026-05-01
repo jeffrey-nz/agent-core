@@ -1786,7 +1786,7 @@ ${currentTask}${capWarning}`,
       const jsxHint = jsxPaths.length > 0
         ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
         : `Check the JSX/TSX component that imports ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
-      const newCssRetry = Math.max((state.coderRetryCount ?? 0) + 1, 1);
+      const newCssRetry = (state.coderRetryCount ?? 0) + 1;
       log(colors.yellow(`  [Graph] -> CSS written but no JSX read detected — requiring CSS/JSX class-name consistency verification.`));
       return {
         verifierFeedback: "FAIL",
@@ -1815,9 +1815,8 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
   // Stub detection gate: catches implementation files that contain return-nothing stubs
   // such as `return []`, `return false`, `return null` in named functions — the classic
   // anti-pattern where the coder scaffolds the shape but leaves logic empty.
-  // Only checks JS/TS/JSX/TSX files written this subtask, and only on the first pass
-  // (coderRetryCount === 0) to avoid consuming all retries on re-checks.
-  if ((state.coderRetryCount ?? 0) === 0) {
+  // Fires on every attempt — stubs are never acceptable regardless of retry count.
+  if (true) {
     const implFiles = (state.modifiedFiles || []).filter(f =>
       /\.(js|ts|jsx|tsx|mjs)$/.test(f) && !/\.test\.|\.spec\./.test(f)
     );
@@ -2050,7 +2049,7 @@ export async function verifierNode(state) {
     feedback === "FAIL" &&
     !state.coderFailed &&
     (state.lastCoderResponse?.length ?? 0) > 50 &&
-    (state.coderRetryCount ?? 0) >= 1;
+    (state.coderRetryCount ?? 0) >= 0;
 
   if (shouldReflect) {
     const lesson = await generateReflexionLesson(state);
