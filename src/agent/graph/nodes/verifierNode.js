@@ -1590,13 +1590,47 @@ DEBUGGING STRATEGY:
       return { verifierFeedback: "PASS" };
     }
 
+    // Planned-files-exist gate: if the PM listed specific files for this subtask,
+    // each of those files MUST exist on disk (either created this subtask or already
+    // present from a prior subtask). Catches the silent failure mode where the coder
+    // writes README/package.json edits and ignores the actual planned source files —
+    // verifier was previously passing these because state.modifiedFiles was non-empty
+    // even though none of the planned files were touched.
+    if (Array.isArray(subtaskMetaEarly?.files) && subtaskMetaEarly.files.length > 0 && state.projectDir) {
+      const missingPlannedFiles = [];
+      for (const f of subtaskMetaEarly.files) {
+        const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+        const exists = await fs.promises.access(abs).then(() => true).catch(() => false);
+        if (!exists) missingPlannedFiles.push(f);
+      }
+      if (missingPlannedFiles.length > 0) {
+        const newRetry = (state.coderRetryCount ?? 0) + 1;
+        log(colors.red(`  [Graph] -> Planned-files gate FAILED: ${missingPlannedFiles.length} file(s) missing.`));
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetry,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER PLANNED FILES GATE]\n\nThe PM planned this subtask to write the following files, but they do not exist on disk:\n${missingPlannedFiles.map(f => `  - ${f}`).join("\n")}\n\nYou MUST use write_file to create each of these files with the actual implementation. Editing README.md, package.json, or vite.config.js does NOT satisfy this subtask — write the planned source files.`,
+          }],
+        };
+      }
+    }
+
     // Project setup gate: fires when package.json was written this subtask.
     // Ensures .gitignore (with node_modules) exists and package.json has no
     // fake "#key" entries. Catches the two most common new-project setup failures.
-    const pkgJsonWritten = (state.modifiedFiles || []).some(
-      (f) => path.basename(f) === "package.json",
-    );
-    if (pkgJsonWritten && state.projectDir) {
+    // Trigger when package.json exists in the project root — not just when it was
+    // written on this turn. The "modifiedFiles only includes this turn" semantics
+    // mean the gate would silently no-op on retry turns (when the coder doesn't
+    // re-write package.json), letting subtask 1 pass without .gitignore.
+    const pkgJsonExistsForGate = state.projectDir
+      ? await fs.promises
+          .access(path.join(state.projectDir, "package.json"))
+          .then(() => true)
+          .catch(() => false)
+      : false;
+    if (pkgJsonExistsForGate && state.projectDir) {
       const setupErrors = await checkProjectSetup(state.projectDir);
       if (setupErrors.length > 0) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
@@ -1614,23 +1648,33 @@ DEBUGGING STRATEGY:
         };
       }
 
-      // Setup passed — run npm install if node_modules is missing.
-      // This enables devServer visual verification on subsequent subtasks.
-      const nodeModulesPath = path.join(state.projectDir, "node_modules");
-      const nodeModulesExists = await fs.promises
-        .access(nodeModulesPath)
+    }
+
+    // Auto npm install: run whenever package.json exists in the project root and
+    // node_modules does not. Independent of which subtask wrote package.json — this
+    // ensures node_modules is present for devServer/visualVerify on later subtasks
+    // even when the scaffold was committed in a prior turn.
+    if (state.projectDir) {
+      const pkgJsonExists = await fs.promises
+        .access(path.join(state.projectDir, "package.json"))
         .then(() => true)
         .catch(() => false);
-      if (!nodeModulesExists) {
-        log(colors.dim("  [Setup] node_modules missing — running npm install..."));
-        try {
-          await execAsync("npm install --prefer-offline", {
-            cwd: state.projectDir,
-            timeout: 180000, // 3 minutes
-          });
-          log(colors.green("  [Setup] npm install completed"));
-        } catch (err) {
-          log(colors.yellow(`  [Setup] npm install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+      if (pkgJsonExists) {
+        const nodeModulesExists = await fs.promises
+          .access(path.join(state.projectDir, "node_modules"))
+          .then(() => true)
+          .catch(() => false);
+        if (!nodeModulesExists) {
+          log(colors.dim("  [Setup] node_modules missing — running npm install..."));
+          try {
+            await execAsync("npm install --prefer-offline", {
+              cwd: state.projectDir,
+              timeout: 180000,
+            });
+            log(colors.green("  [Setup] npm install completed"));
+          } catch (err) {
+            log(colors.yellow(`  [Setup] npm install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+          }
         }
       }
     }

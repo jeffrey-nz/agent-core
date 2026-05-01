@@ -35,12 +35,11 @@ export async function startDevServer(projectDir) {
     Object.keys(deps).some((k) => k.includes("@vitejs"));
   if (!isViteOrReact) return null;
 
-  // 3. node_modules must exist (npm install has been run)
+  // 3. node_modules must exist (npm install has been run by verifier post-setup gate)
   try {
     await fs.access(path.join(projectDir, "node_modules"));
   } catch {
-    log(colors.dim("  [DevServer] node_modules not found — skipping visual verify"));
-    return null;
+    return null; // silent: verifier auto-installs on next pass
   }
 
   // 4. Bridge must be reachable
