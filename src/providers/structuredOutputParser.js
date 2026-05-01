@@ -49,7 +49,10 @@ function extractCodeBlockArrays(text) {
     const fenceEnd = text.indexOf("```", contentStart);
     if (fenceEnd === -1) break;
     const blockContent = text.substring(contentStart, fenceEnd).trim();
-    const parsed = tryParseArray(blockContent);
+    let parsed = tryParseArray(blockContent);
+    if (!parsed) {
+      try { parsed = tryParseArray(jsonrepair(blockContent)); } catch {}
+    }
     if (parsed) results.push(...parsed);
     pos = fenceEnd + 3;
   }
@@ -97,6 +100,7 @@ export class StructuredOutputParser {
 
     // Strategy 1: first "[{" to last "]"
     let startIdx = -1;
+    let closingBracket = -1;
     let searchFrom = 0;
     while (searchFrom < text.length) {
       const bracketIdx = text.indexOf("[", searchFrom);
@@ -110,9 +114,16 @@ export class StructuredOutputParser {
     }
 
     if (startIdx !== -1) {
-      const lastBracket = text.lastIndexOf("]");
-      if (lastBracket > startIdx) {
-        const parsed = tryParseArray(text.substring(startIdx, lastBracket + 1));
+      // Use bracket-depth walk to find the correct closing ] rather than lastIndexOf,
+      // which would stop at a ] inside a content string (e.g. TypeScript array literals).
+      closingBracket = findMatchingClose(text, startIdx);
+      const endIdx = closingBracket !== -1 ? closingBracket : text.lastIndexOf("]");
+      if (endIdx > startIdx) {
+        const candidate = text.substring(startIdx, endIdx + 1);
+        let parsed = tryParseArray(candidate);
+        if (!parsed) {
+          try { parsed = tryParseArray(jsonrepair(candidate)); } catch {}
+        }
         if (parsed) {
           for (const tc of parsed) {
             const norm = normalizeToolCall(tc);
@@ -201,7 +212,7 @@ export class StructuredOutputParser {
     // Most parse-error recovery loops are caused by unescaped " inside code content strings.
     // jsonrepair uses structural look-ahead to fix these without mangling the content.
     // Only attempt on the first [...] candidate or the whole text if no bracket was found.
-    const repairTarget = startIdx !== -1 ? text.substring(startIdx, text.lastIndexOf("]") + 1) : text;
+    const repairTarget = startIdx !== -1 ? text.substring(startIdx, (closingBracket !== -1 ? closingBracket : text.lastIndexOf("]")) + 1) : text;
     if (repairTarget) {
       try {
         const repaired = jsonrepair(repairTarget);

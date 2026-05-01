@@ -34,7 +34,7 @@ Check for:
 1. Blank/white/all-black page (= broken)
 2. Primary UI element missing (board, form, calculator, etc.) (= broken)
 3. Visible JS error overlay or React error boundary message (= broken)
-4. For chess/board games: board squares must be two alternating colors; pieces must be visually distinct (white vs black)
+4. For chess/board games: board squares must alternate between two colors; pieces must use proper Unicode chess symbols (♔♕♖♗♘♙♚♛♜♝♞♟) or images — NOT bare letter codes like K/Q/R/B/N/P, as those are unacceptably poor UX
 5. Obviously broken layout: invisible text, collapsed elements, completely unstyled raw HTML`;
 
 export async function checkVisualVerify(projectDir, devServerResult) {

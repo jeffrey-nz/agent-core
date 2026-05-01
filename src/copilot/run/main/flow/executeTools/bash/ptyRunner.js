@@ -6,7 +6,12 @@ import { SAFE_ENV, INTERACTIVE_PROMPT_PATTERNS } from "./pty/constants.js";
 import { runFallbackCommand } from "./pty/fallbackRunner.js";
 import { STALL_TIMEOUT_MS, HARD_TIMEOUT_MS } from "#config/pipeline.js";
 
+// npm install and npm ci can be silent for extended periods during resolution/fetching.
+// Use a longer stall timeout (5 min) so they don't get killed prematurely.
+const isNpmInstall = (cmd) => /\bnpm\s+(install|ci|i)\b/.test(cmd) || /\bpnpm\s+install\b/.test(cmd) || /\byarn(\s+install)?\b/.test(cmd);
+
 export async function runPtyCommand(cmd, cwd, spinner) {
+  const stallMs = isNpmInstall(cmd) ? 300_000 : STALL_TIMEOUT_MS;
   return await new Promise((resolve) => {
     let ptyProcess;
     try {
@@ -58,9 +63,9 @@ export async function runPtyCommand(cmd, cwd, spinner) {
         } catch (e) {}
         finish({
           status: 124,
-          output: output + `\n[ERROR: KILLED DUE TO INACTIVITY (${STALL_TIMEOUT_MS / 1000}s).]`,
+          output: output + `\n[ERROR: KILLED DUE TO INACTIVITY (${stallMs / 1000}s).]`,
         });
-      }, STALL_TIMEOUT_MS);
+      }, stallMs);
     };
 
     ptyProcess.onData((data) => {

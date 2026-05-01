@@ -10,14 +10,19 @@ export async function checkStaticAnalysis(
 ) {
   const errors = [];
 
-  if (
-    tsFiles.length > 0 &&
-    (await fileExists(path.join(projectDir, "tsconfig.json")))
-  ) {
-    log(colors.dim("  [Verifier] Running TypeScript compiler check..."));
-    const res = await execAsync(`npx tsc --noEmit`, { cwd: projectDir });
-    if (res.status !== 0)
-      errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+  if (tsFiles.length > 0) {
+    // Prefer tsconfig.app.json (Vite projects), fall back to tsconfig.json
+    const tsconfigApp = path.join(projectDir, "tsconfig.app.json");
+    const tsconfigRoot = path.join(projectDir, "tsconfig.json");
+    const hasTsconfigApp = await fileExists(tsconfigApp);
+    const hasTsconfigRoot = await fileExists(tsconfigRoot);
+    if (hasTsconfigApp || hasTsconfigRoot) {
+      log(colors.dim("  [Verifier] Running TypeScript compiler check..."));
+      const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
+      const res = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: projectDir });
+      if (res.status !== 0)
+        errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+    }
   }
 
   if (

@@ -3,6 +3,7 @@ import { AgentState } from "./state.js";
 import { updateCheckpointState } from "./checkpointBridge.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
+import { execAsync } from "#utils/exec.js";
 import { orchestratorNode } from "./nodes/orchestratorNode.js";
 import { researcherNode } from "./nodes/researcherNode.js";
 import { directWriterNode } from "./nodes/directWriterNode.js";
@@ -42,6 +43,7 @@ import {
  *   investigation  → broadcastReviews  (report only; no code changes)
  *   quick_edit     → projectManager  (skip deep scoping; researcher already found the location)
  *   direct_fix     → projectManager  (intent skipped — orchestrator routes directly to PM)
+ *   new_project    → projectManager  (no existing code to scope — PM plans from intent document)
  *   code_change    → scoper  (default; full deep-analysis pipeline)
  */
 function routeByTaskType(state) {
@@ -49,18 +51,19 @@ function routeByTaskType(state) {
     case "documentation": return "directWriter";
     case "investigation":  return "broadcastReviews";
     case "quick_edit":
-    case "direct_fix":     return "projectManager";
+    case "direct_fix":
+    case "new_project":    return "projectManager";
     default:               return "scoper";
   }
 }
 
 /**
  * Route after intent node.
- * direct_fix: prompt already specifies the file and change — skip research entirely.
+ * direct_fix/new_project: skip research — PM works from the intent document alone.
  * All other types: proceed to contextRetriever → researcher → refiner.
  */
 function routeAfterIntent(state) {
-  if (state.taskType === "direct_fix") return "projectManager";
+  if (state.taskType === "direct_fix" || state.taskType === "new_project") return "projectManager";
   return "contextRetriever";
 }
 
@@ -173,11 +176,32 @@ function routeFromAggregator(state) {
   return "coder";
 }
 
-const nextSubtaskNode = (state) => {
+const nextSubtaskNode = async (state) => {
   const nextIndex = (state.currentSubtaskIndex || 0) + 1;
   // Keep the checkpoint bridge in sync so a crash mid-session resumes at the
   // correct subtask rather than replaying work that already completed.
   updateCheckpointState({ currentSubtaskIndex: nextIndex });
+
+  // Commit any uncommitted files before advancing. When a subtask is force-advanced
+  // (max retries exceeded), files written by the coder may still be on disk but
+  // uncommitted. Without this commit, a later archiveAndRevert (git reset --hard)
+  // in a different subtask would delete them, causing silent data loss.
+  if (state.projectDir) {
+    try {
+      const status = await execAsync("git status --porcelain", { cwd: state.projectDir });
+      if (status.stdout.trim()) {
+        const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task?.slice(0, 60) || "force-advanced subtask";
+        await execAsync("git add -A", { cwd: state.projectDir });
+        await execAsync(
+          `git commit -m "force-advance: ${taskLabel.replace(/["`$\\]/g, "'")} (max retries exceeded)"`,
+          { cwd: state.projectDir },
+        );
+        log(colors.yellow(`  [Pipeline] Force-advanced uncommitted files committed: ${taskLabel}`));
+      }
+    } catch (e) {
+      log(colors.dim(`  [Pipeline] Force-advance commit skipped: ${e.message?.slice(0, 80)}`));
+    }
+  }
   return {
     currentSubtaskIndex: nextIndex,
     coderRetryCount: 0,

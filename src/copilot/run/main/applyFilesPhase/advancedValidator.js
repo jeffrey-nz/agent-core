@@ -25,13 +25,22 @@ export async function runAdvancedValidator(projectDir, modifiedFilesAbs) {
     errors.push(...(await checkHttpSmoke(projectDir, modifiedFilesAbs)));
   }
 
-  // Dev server + visual verification: only when JSX/TSX/CSS files were modified.
-  // Skipping on test-only or logic-only subtasks avoids noise when the UI isn't
-  // expected to be fully functional yet.
+  // Dev server + visual verification: only when the change is likely to affect what
+  // the app looks like. Runs when either:
+  //   a) An entry-point file was modified (App.tsx, main.tsx, index.tsx etc.), or
+  //   b) A top-level app CSS file was modified (App.css, index.css, main.css) — these
+  //      are always imported by the entry point and changes affect the whole UI.
+  // Skipping on component-only or logic-only subtasks avoids false positives when
+  // the component hasn't been wired into the app yet.
   const hasUiChanges = modifiedFilesAbs.some((f) =>
     /\.(jsx|tsx|css|html|svg)$/.test(f),
   );
-  if (errors.length === 0 && hasUiChanges) {
+  const ENTRY_POINT_RE = /(?:^|\/)(?:App|main|index)\.[jt]sx?$/i;
+  const TOP_LEVEL_CSS_RE = /(?:^|\/)(?:App|main|index|global|styles?)\.css$/i;
+  const hasEntryPointChange = modifiedFilesAbs.some(
+    (f) => ENTRY_POINT_RE.test(f) || TOP_LEVEL_CSS_RE.test(f),
+  );
+  if (errors.length === 0 && hasUiChanges && hasEntryPointChange) {
     let devServerResult = null;
     try {
       devServerResult = await startDevServer(projectDir);

@@ -289,6 +289,7 @@ async function checkProjectSetup(projectDir) {
   }
 
   // package.json must not have fake deps (keys starting with "#")
+  // Also check TypeScript projects have a tsconfig.
   try {
     const pkg = JSON.parse(
       await fs.promises.readFile(path.join(projectDir, "package.json"), "utf8"),
@@ -304,6 +305,22 @@ async function checkProjectSetup(projectDir) {
           "These are NOT valid npm packages. Remove them immediately. " +
           "Never use package.json to track task completion or pipeline state.",
       );
+    }
+
+    // TypeScript project must have a tsconfig so tsc can type-check it.
+    // Without a tsconfig, all type errors are silently skipped in every subtask.
+    const hasTypeScript = !!(pkg.devDependencies?.typescript || pkg.dependencies?.typescript);
+    if (hasTypeScript) {
+      const hasTsconfigApp = await fs.promises.access(path.join(projectDir, "tsconfig.app.json")).then(() => true).catch(() => false);
+      const hasTsconfigRoot = await fs.promises.access(path.join(projectDir, "tsconfig.json")).then(() => true).catch(() => false);
+      if (!hasTsconfigApp && !hasTsconfigRoot) {
+        errors.push(
+          "TypeScript project is MISSING tsconfig.json (or tsconfig.app.json). " +
+            "Without it, the TypeScript compiler cannot type-check ANY file, so type errors accumulate silently. " +
+            "Create tsconfig.json NOW with at minimum: target, lib, module, jsx, strict, noEmit, moduleResolution, include. " +
+            "Vite projects typically also need: allowImportingTsExtensions, isolatedModules.",
+        );
+      }
     }
   } catch {
     /* JSON parse errors are caught by the syntax validator */
@@ -1839,6 +1856,45 @@ DEBUGGING STRATEGY:
       ? `\n\n⚠️ PROSE OUTPUT DETECTED: Your response contained what appears to be file content printed as plain text. THIS DOES NOT CREATE THE FILE. The content was discarded.\nYou MUST use the write_file tool with the actual file path. Example:\n[{"tool": "write_file", "path": "${proseExamplePath}", "content": "...full file content here..."}]`
       : "";
 
+    // Ground-truth filesystem snapshot: show which expected files are missing vs.
+    // already exist. This breaks DeepSeek's confabulation pattern where it "recalls"
+    // writing a file from earlier conversation context and skips the write_file call.
+    let fsStateHint = "";
+    if (subtaskFiles?.length > 0 && state.projectDir) {
+      const fileStates = subtaskFiles.map((f) => {
+        const absPath = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+        const exists = fs.existsSync(absPath);
+        return `  ${exists ? "✓ EXISTS" : "✗ MISSING"}: ${absPath}`;
+      });
+      // Also list the actual contents of directories containing missing files
+      const missingDirs = new Set(
+        subtaskFiles
+          .filter((f) => {
+            const absPath = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+            return !fs.existsSync(absPath);
+          })
+          .map((f) => {
+            const absPath = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+            return path.dirname(absPath);
+          }),
+      );
+      const dirListings = [];
+      for (const dir of missingDirs) {
+        try {
+          const entries = fs.readdirSync(dir);
+          dirListings.push(`  ${dir}/: [${entries.join(", ")}]`);
+        } catch {
+          // dir doesn't exist yet — no listing
+        }
+      }
+      fsStateHint =
+        `\n\nFILESYSTEM STATE (actual disk state — not conversation history):\n` +
+        fileStates.join("\n") +
+        (dirListings.length > 0
+          ? `\n\nActual directory contents:\n${dirListings.join("\n")}`
+          : "");
+    }
+
     return {
       verifierFeedback: "FAIL",
       coderRetryCount: newRetryCount,
@@ -1851,7 +1907,7 @@ You did not write or modify any files in your last response. This task requires 
 CRITICAL INSTRUCTION: You MUST use 'write_file' or 'patch_file' in your very next response to implement the subtask below. Do not explain what you will do - execute the tool immediately.
 
 CURRENT SUBTASK:
-${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${proseWarning}${capWarning}`,
+${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWarning}${capWarning}`,
         },
       ],
     };
@@ -1860,6 +1916,54 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${proseWarning}${capWarn
   const currentTask =
     state.subtasks?.[state.currentSubtaskIndex]?.task ||
     "Complete the implementation";
+
+  // Planned-files gate (files-written path): if the PM listed specific files for
+  // this subtask and the coder wrote NONE of them (wrote different files instead),
+  // fail early. This catches the debugger-writes-App.tsx-for-CapturedPieces pattern
+  // where a wrong file happens to compile, causing a false PASS.
+  {
+    const subtaskPlan = state.subtasks?.[state.currentSubtaskIndex];
+    if (
+      Array.isArray(subtaskPlan?.files) &&
+      subtaskPlan.files.length > 0 &&
+      state.projectDir
+    ) {
+      const modifiedAbsSet = new Set(
+        (state.modifiedFiles || []).map((f) =>
+          path.isAbsolute(f) ? f : path.join(state.projectDir, f),
+        ),
+      );
+      const anyPlanFileTouched = subtaskPlan.files.some((f) => {
+        const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+        return modifiedAbsSet.has(abs);
+      });
+      if (!anyPlanFileTouched) {
+        const newRetry = (state.coderRetryCount ?? 0) + 1;
+        log(
+          colors.red(
+            `  [Graph] -> Planned-files gate FAIL: coder wrote ${(state.modifiedFiles || []).map((f) => path.basename(f)).join(", ")} but none of the planned files.`,
+          ),
+        );
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetry,
+          messages: [
+            {
+              role: "user",
+              content:
+                `[VERIFIER PLANNED FILES GATE]\n\n` +
+                `You wrote files but NONE of the PM-planned files for this subtask were among them.\n\n` +
+                `Expected to write (at least one of):\n` +
+                subtaskPlan.files.map((f) => `  - ${f}`).join("\n") +
+                `\n\nYou actually modified: ` +
+                (state.modifiedFiles || []).map((f) => path.basename(f)).slice(0, 5).join(", ") +
+                `\n\nYou MUST use write_file or patch_file on one of the planned files above to satisfy this subtask.`,
+            },
+          ],
+        };
+      }
+    }
+  }
 
   // Unity UI Toolkit asset files (UXML, USS) are implementation output that
   // doesn't require C# compilation. Short-circuit to PASS immediately so the
@@ -2005,13 +2109,21 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
         ).catch((e) => ({ stdout: e.stdout || "", stderr: e.stderr || "", status: 1 }));
 
         const tscOutput = (tscResult.stdout || "").trim();
-        // Only surface errors in files that were just written — pre-existing errors in
-        // other subtasks' files would unfairly block an unrelated subtask.
+        // When tsconfig itself is newly written, ALL project files now fall under
+        // type-checking for the first time — surface errors in any file so that
+        // pre-existing type errors committed before the tsconfig existed are caught
+        // rather than silently accumulating until the final build fails.
+        const tsconfigJustCreated = (state.modifiedFiles || []).some(
+          f => /tsconfig(\.\w+)?\.json$/.test(path.basename(f))
+        );
+        // Otherwise only surface errors in files that were just written — pre-existing
+        // errors in other subtasks' files would unfairly block an unrelated subtask.
         const modifiedBaseNames = new Set((state.modifiedFiles || []).map(f => path.basename(f)));
         const tscErrors = tscOutput
           .split("\n")
           .filter(l => {
             if (!l.includes("error TS") && !(l.includes(": error") && l.includes(".ts"))) return false;
+            if (tsconfigJustCreated) return true;
             return [...modifiedBaseNames].some(name => l.includes(name));
           })
           .slice(0, 20)

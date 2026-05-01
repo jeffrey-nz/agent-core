@@ -4,18 +4,25 @@ import { eventBus } from "#web/eventBus.js";
 import { closeAutomationApi } from "./automationApiTurn.js";
 import { injectRotationHandoff } from "./rotation.js";
 
+const ROTATION_THRESHOLDS = {
+  copilot365: 15,
+  deepseek: 20,
+};
+
+const SUPPORTED_PROVIDERS = new Set(Object.keys(ROTATION_THRESHOLDS));
+
 export async function handleSegmentBoundary({
   providerName,
   automationState,
   getProgressSummary,
   payload,
 }) {
-  const ROTATION_THRESHOLD = providerName === "copilot365" ? 15 : 32;
+  const rotationThreshold = ROTATION_THRESHOLDS[providerName];
 
   if (
-    providerName !== "copilot365" ||
+    !SUPPORTED_PROVIDERS.has(providerName) ||
     !automationState.remoteSessionId ||
-    automationState.messageCount < ROTATION_THRESHOLD
+    automationState.messageCount < rotationThreshold
   ) {
     return payload;
   }
@@ -26,7 +33,7 @@ export async function handleSegmentBoundary({
 
   log(
     colors.yellow(
-      `  [Segment] Copilot 365 session ${segmentIndex - 1} had ${previousMessageCount} messages — starting segment ${segmentIndex} in fresh browser session.`,
+      `  [Segment] ${providerName} session ${segmentIndex - 1} had ${previousMessageCount} messages — starting segment ${segmentIndex} in fresh browser session.`,
     ),
   );
 
@@ -39,12 +46,15 @@ export async function handleSegmentBoundary({
     }
   }
 
-  eventBus.emit("copilot365_segment_boundary", {
-    segmentIndex,
-    previousMessageCount,
-    gitDiffStat: progressSummary,
-    timestamp: new Date().toISOString(),
-  });
+  // Keep the copilot365-specific event for backward compatibility
+  if (providerName === "copilot365") {
+    eventBus.emit("copilot365_segment_boundary", {
+      segmentIndex,
+      previousMessageCount,
+      gitDiffStat: progressSummary,
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   await closeAutomationApi(automationState);
   automationState.messageCount = 0;
@@ -52,7 +62,7 @@ export async function handleSegmentBoundary({
   const newPayload = injectRotationHandoff(
     payload,
     automationState.lastResponseText,
-    { segmentIndex, progressSummary },
+    { segmentIndex, progressSummary, providerName },
   );
   automationState.lastResponseText = "";
 

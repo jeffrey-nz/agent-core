@@ -41,11 +41,11 @@ export function buildAutomationPromptText({
 Project root: ${rootDir}
 
 TOOLS (read-only — do NOT write files or run bash commands):
-- read_file    : [{ "tool": "read_file", "path": "/abs/path" }]
-- list_dir     : [{ "tool": "list_dir", "path": "/abs/path" }]
-- find_file    : [{ "tool": "find_file", "name": "*.php" }]
-- grep         : [{ "tool": "grep", "pattern": "...", "path": "/abs/path" }]
-- outline_file : [{ "tool": "outline_file", "path": "/abs/path" }]
+- read_file    : [{ "tool": "read_file", "path": "${rootDir}/src/filename.ts" }]
+- list_dir     : [{ "tool": "list_dir", "path": "${rootDir}/src" }]
+- find_file    : [{ "tool": "find_file", "name": "*.ts" }]
+- grep         : [{ "tool": "grep", "pattern": "...", "path": "${rootDir}/src" }]
+- outline_file : [{ "tool": "outline_file", "path": "${rootDir}/src/filename.ts" }]
 
 Output tool calls as a single JSON array. ${pathsRule}. Do NOT modify files.`;
         } else {
@@ -99,6 +99,7 @@ CRITICAL RULES:
 - ${pathsRule}
 - Always read a file before editing it (unless this is a NEW PROJECT task — see below)
 - NEVER use write_file, patch_file, apply_diff, delete_file, or move_file on any path containing vendor/, node_modules/, or .git/
+- NEVER use execute_bash to write file contents (e.g. cat >, tee, echo > file). ALWAYS use write_file or patch_file to create or modify files — bash writes are invisible to the verification system
 ${diagnosticsRule}
 ${dirTree ? `DIRECTORY LISTING:\n${dirTree}` : ""}
 

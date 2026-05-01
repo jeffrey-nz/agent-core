@@ -72,6 +72,19 @@ quick_edit
     - "Fix the N+1 queries throughout the codebase" — systemic, multi-file
   When the location or number of affected files is unclear, default to code_change.
 
+new_project
+  Build a BRAND NEW application, game, tool, or component from scratch in an empty or scaffolded workspace.
+  No existing codebase to analyse — the user wants a complete working product created from nothing.
+  Examples:
+    - "Build a chess game in React"
+    - "Create a todo app with TypeScript and Vite"
+    - "Make a calculator web app"
+    - "Build a weather dashboard using React"
+    - "Create a Snake game in vanilla JS"
+  Anti-examples (use code_change instead):
+    - "Add a dark mode to the existing app" — modifying existing code
+    - "Build a new settings page for the dashboard" — extending an existing project
+
 code_change
   A COMPLEX change requiring deep codebase analysis across multiple files.
   New features, refactors, integration work, multi-step logic changes.
@@ -82,7 +95,7 @@ code_change
 
 OUTPUT FORMAT - respond with ONLY valid JSON, no prose, no markdown:
 {
-  "taskType": "documentation" | "investigation" | "quick_edit" | "code_change",
+  "taskType": "documentation" | "investigation" | "quick_edit" | "new_project" | "code_change",
   "rationale": "one sentence explaining the classification"
 }`;
 
@@ -109,6 +122,14 @@ function classifyByKeywords(taskText) {
     !/\bfix\b|\bimplement\b|\bcreate\b|\badd\b|\bchange\b/i.test(taskText)
   ) {
     return { taskType: "investigation", rationale: "Keyword match: analysis-only task with no expected file changes" };
+  }
+
+  // New project: build a brand-new app/game/tool from scratch.
+  if (
+    /\b(build|create|make|develop|implement|scaffold|generate)\b.{0,60}\b(app|application|game|tool|project|dashboard|website|site|calculator|chess|todo|weather|snake|tetris|widget)\b/i.test(taskText) &&
+    !/\b(existing|current|already|add to|extend|update|fix|change)\b/i.test(taskText)
+  ) {
+    return { taskType: "new_project", rationale: "Keyword match: building a new application from scratch" };
   }
 
   // Quick edit: fix a specific named error/bug/value in one place.
@@ -181,7 +202,7 @@ export async function orchestratorNode(state, config) {
       const jsonMatch = classifyText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        if (["documentation", "investigation", "quick_edit", "code_change"].includes(parsed.taskType)) {
+        if (["documentation", "investigation", "quick_edit", "new_project", "code_change"].includes(parsed.taskType)) {
           taskType = parsed.taskType;
           rationale = parsed.rationale || rationale;
           classifiedBy = "ai";
@@ -223,6 +244,7 @@ export async function orchestratorNode(state, config) {
     documentation: "researcher → directWriter → verifier",
     investigation: "researcher → reviews",
     quick_edit:    "researcher → projectManager → coder → verifier → reviews",
+    new_project:   "intent → projectManager → coder → verifier → reviews",
     code_change:   "researcher → scoper → projectManager → coder → verifier → reviews",
     direct_fix:    "projectManager → coder → verifier → reviews",
   };
@@ -232,6 +254,7 @@ export async function orchestratorNode(state, config) {
     documentation: ["orchestrator", "researcher", "directWriter", "verifier"],
     investigation: ["orchestrator", "researcher", "securityReviewer", "requirementsReviewer"],
     quick_edit:    ["orchestrator", "researcher", "projectManager", "coder", "verifier", "debugger", "securityReviewer", "requirementsReviewer"],
+    new_project:   ["orchestrator", "projectManager", "coder", "verifier", "debugger", "securityReviewer", "requirementsReviewer"],
     code_change:   ["orchestrator", "researcher", "scoper", "projectManager", "coder", "verifier", "debugger", "stuckAnalyzer", "securityReviewer", "requirementsReviewer"],
     direct_fix:    ["orchestrator", "projectManager", "coder", "verifier", "debugger", "securityReviewer", "requirementsReviewer"],
   };
@@ -240,6 +263,7 @@ export async function orchestratorNode(state, config) {
     documentation: "Documentation",
     investigation: "Investigation",
     quick_edit:    "Quick Edit",
+    new_project:   "New Project",
     code_change:   "Code Change",
     direct_fix:    "Direct Fix",
   };

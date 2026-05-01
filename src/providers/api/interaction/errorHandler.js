@@ -23,6 +23,18 @@ export async function handleApiError(res, sessionId) {
     throw e;
   }
   if (res.status === 503 && err.stalled) {
+    if (err.rateLimited) {
+      log(
+        colors.yellow(
+          `  [Automation API] DeepSeek rate limit — bridge exhausted all backoff retries. Will retry subtask.`,
+        ),
+      );
+      const e = new Error(
+        `RATE_LIMITED: DeepSeek rate limit — bridge exhausted backoff retries`,
+      );
+      e.rateLimited = true;
+      throw e;
+    }
     log(
       colors.yellow(
         `  [Automation API] Turn was skipped by operator (stall resolved as skip).`,

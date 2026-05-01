@@ -34,6 +34,18 @@ The intent document will be used by:
 - A coder to understand what "done" really means
 - Reviewers to verify the solution against objective criteria
 
+IMPORTANT — for "new project" tasks (build a game, app, tool from scratch):
+Expand the user's brief description into comprehensive, production-quality requirements. If the user says "build a chess game", infer ALL expected features a quality chess game needs:
+- Complete rules for all piece types and special moves
+- Game state management (check, checkmate, stalemate, draws)
+- Clean visual UI with PROPER piece rendering: for chess, pieces MUST use Unicode symbols (♔♕♖♗♘♙♚♛♜♝♞♟) or SVG images — never bare letter codes (K/Q/R/B/N/P) which are unacceptable
+- Highlighted selected squares, legal move indicators (dots or colored overlays)
+- AI opponent or two-player mode
+- TypeScript types, responsive design, npm run build exits 0
+Include these as specific success_criteria even if not explicitly mentioned by the user.
+
+VISUAL QUALITY RULE for all interactive/game projects: game entities (pieces, cards, tiles, etc.) must be rendered using recognizable visual elements (Unicode symbols, SVG images, proper icons), not bare letter/number codes.
+
 Output a JSON object with exactly these fields:
 
 {
@@ -50,7 +62,7 @@ Output a JSON object with exactly these fields:
     "Technical constraint the solution must respect (framework conventions, APIs, patterns already in use)",
     ...
   ],
-  "verification_approach": "How success can be confirmed without human interaction — e.g. 'http_request returns HTTP 200 with markup containing X'",
+  "verification_approach": "How success can be confirmed without human interaction — e.g. 'execute_bash npm run build exits 0 and npm run dev starts the dev server'",
   "risk_areas": [
     "Area of high uncertainty or common failure point that deserves extra research attention",
     ...
@@ -59,9 +71,10 @@ Output a JSON object with exactly these fields:
 
 Rules:
 - Be concrete and specific — avoid vague words like "properly" or "correctly"
-- success_criteria must be verifiable by code (http_request, grep, read_file, execute_bash)
+- success_criteria must be verifiable by code (execute_bash, grep, read_file)
+- For new projects: expand brief descriptions into full feature lists — the user expects a complete, polished result
 - out_of_scope should name specific files, features, or behaviours that must not change
-- risk_areas should name specific technical areas likely to cause problems (e.g. "SilverStripe manifest cache must be cleared after YAML changes")
+- risk_areas should name specific technical areas likely to cause problems
 - Output ONLY the JSON object — no preamble, no explanation`;
 
 export async function intentNode(state, config) {

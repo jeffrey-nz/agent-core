@@ -376,6 +376,20 @@ SELF-CHECK (apply before outputting):
 For each subtask ask: "Could a coder implement this without opening any file?" If the answer is No, the implementation_note is too vague - add the specific class name, method signature, existing code snippet, or config value that resolves the ambiguity.
 Final plan check: Does this plan contain at least one subtask that writes or modifies a file? If all subtasks are REVIEW, EXECUTION-ONLY, or ACCEPTANCE TEST tasks — you MUST add implementation subtasks or the session produces zero output.`;
 
+  if (state.taskType === "new_project") {
+    systemPrompt += `
+
+NEW_PROJECT MODE — You are building a brand-new application from scratch. There is no existing codebase to analyze.
+- The workspace has a bare scaffold (e.g. Vite template) — your job is to plan ALL the source files that need to be created.
+- Do NOT look for existing line numbers or class names to modify — create everything new.
+- The SCOPE DOCUMENT may be empty or minimal — use the INTENT ANALYSIS and ORIGINAL TASK as your primary guide.
+- Plan COMPREHENSIVE coverage: every feature mentioned in the task must have a subtask that creates the code for it.
+- Each subtask should create a coherent set of related files (e.g. "Create chess engine types and board logic", "Create piece move generators", etc.).
+- First subtask must always install dependencies (npm install) and ensure the project builds (npm run build).
+- Last subtask should be a full integration: wire all components together and verify the app runs (npm run dev starts without errors).
+- implementation_note must describe WHAT TO CREATE, not what to modify.`;
+  }
+
   if (state.taskType === "direct_fix") {
     // For direct_fix benchmarks the prompt already names the exact file and change.
     // A single implementation subtask is sufficient; extra REVIEW/SEARCH/ACCEPTANCE

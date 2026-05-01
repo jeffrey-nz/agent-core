@@ -1,6 +1,7 @@
 export function injectRotationHandoff(payload, lastResponseText, opts = {}) {
-  const { segmentIndex, progressSummary } = opts;
+  const { segmentIndex, progressSummary, providerName } = opts;
   const sessionNum = segmentIndex ?? 1;
+  const provider = providerName || "AI";
 
   const snippet =
     lastResponseText && lastResponseText.length > 500
@@ -8,8 +9,8 @@ export function injectRotationHandoff(payload, lastResponseText, opts = {}) {
       : lastResponseText || "";
 
   const lines = [
-    `[COPILOT 365 — CONTINUING IN NEW BROWSER SESSION (Session ${sessionNum})]`,
-    "Your previous Copilot 365 browser session reached its message limit and was closed.",
+    `[${provider.toUpperCase()} — CONTINUING IN NEW BROWSER SESSION (Session ${sessionNum})]`,
+    `Your previous ${provider} browser session reached its message limit and was closed.`,
     "The full codebase and task are being re-sent below. Continue from where you left off.",
     "",
   ];
