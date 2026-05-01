@@ -1613,6 +1613,26 @@ DEBUGGING STRATEGY:
           ],
         };
       }
+
+      // Setup passed — run npm install if node_modules is missing.
+      // This enables devServer visual verification on subsequent subtasks.
+      const nodeModulesPath = path.join(state.projectDir, "node_modules");
+      const nodeModulesExists = await fs.promises
+        .access(nodeModulesPath)
+        .then(() => true)
+        .catch(() => false);
+      if (!nodeModulesExists) {
+        log(colors.dim("  [Setup] node_modules missing — running npm install..."));
+        try {
+          await execAsync("npm install --prefer-offline", {
+            cwd: state.projectDir,
+            timeout: 180000, // 3 minutes
+          });
+          log(colors.green("  [Setup] npm install completed"));
+        } catch (err) {
+          log(colors.yellow(`  [Setup] npm install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+        }
+      }
     }
 
     const newRetryCount = (state.coderRetryCount ?? 0) + 1;
@@ -1753,19 +1773,28 @@ ${currentTask}${capWarning}`,
   // doesn't match the JSX (e.g. className="light-square"). Only fires once per
   // subtask to avoid consuming all retries on the consistency check alone.
   const cssFilesWritten = (state.modifiedFiles || []).filter(f => f.endsWith('.css'));
-  if (cssFilesWritten.length > 0 && (state.coderRetryCount ?? 0) === 0) {
-    const jsxPaths = (state.modifiedFiles || []).filter(f => /\.(jsx|tsx)$/.test(f));
-    const jsxHint = jsxPaths.length > 0
-      ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
-      : `Check the JSX/TSX component that imports ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
-    log(colors.yellow(`  [Graph] -> CSS written — requiring CSS/JSX class-name consistency verification.`));
-    return {
-      verifierFeedback: "FAIL",
-      coderRetryCount: 1,
-      messages: [{
-        role: "user",
-        content: `[VERIFIER CSS CONSISTENCY CHECK]
-You wrote a CSS file (${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}). Before this subtask can pass, you MUST verify that every CSS selector matches a className actually used in the JSX.
+  if (cssFilesWritten.length > 0) {
+    // Check if the last coder response included reading a JSX/TSX file.
+    // This is the evidence that the coder actually verified class name consistency.
+    // Pattern: JSON tool call with "read_file" and a .jsx/.tsx path.
+    const lastResp = state.lastCoderResponse || "";
+    const readJsxEvidence = /"read_file"[^}]{1,200}\.(jsx|tsx)/.test(lastResp) ||
+      /read_file[^\n]{1,100}\.(jsx|tsx)/.test(lastResp);
+
+    if (!readJsxEvidence) {
+      const jsxPaths = (state.modifiedFiles || []).filter(f => /\.(jsx|tsx)$/.test(f));
+      const jsxHint = jsxPaths.length > 0
+        ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
+        : `Check the JSX/TSX component that imports ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
+      const newCssRetry = Math.max((state.coderRetryCount ?? 0) + 1, 1);
+      log(colors.yellow(`  [Graph] -> CSS written but no JSX read detected — requiring CSS/JSX class-name consistency verification.`));
+      return {
+        verifierFeedback: "FAIL",
+        coderRetryCount: newCssRetry,
+        messages: [{
+          role: "user",
+          content: `[VERIFIER CSS CONSISTENCY CHECK]
+You wrote a CSS file (${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}) but did not read the JSX component to verify class name consistency. Before this subtask can pass, you MUST verify that every CSS selector matches a className actually used in the JSX.
 
 MANDATORY STEPS:
 1. Call read_file on the JSX component(s) that import this CSS.
@@ -1777,9 +1806,70 @@ MANDATORY STEPS:
 
 ${jsxHint}
 
-Do NOT output [] without reading the JSX first.`,
-      }],
-    };
+Do NOT output [] without reading the JSX first. The verifier checks your response for evidence of read_file on a .jsx or .tsx file.`,
+        }],
+      };
+    }
+  }
+
+  // Stub detection gate: catches implementation files that contain return-nothing stubs
+  // such as `return []`, `return false`, `return null` in named functions — the classic
+  // anti-pattern where the coder scaffolds the shape but leaves logic empty.
+  // Only checks JS/TS/JSX/TSX files written this subtask, and only on the first pass
+  // (coderRetryCount === 0) to avoid consuming all retries on re-checks.
+  if ((state.coderRetryCount ?? 0) === 0) {
+    const implFiles = (state.modifiedFiles || []).filter(f =>
+      /\.(js|ts|jsx|tsx|mjs)$/.test(f) && !/\.test\.|\.spec\./.test(f)
+    );
+    const stubPatterns = [
+      // function body that is ONLY a return of an empty/falsy value
+      /\bfunction\s+\w+\s*\([^)]*\)\s*\{\s*return\s+\[\s*\]\s*;?\s*\}/,
+      /\bfunction\s+\w+\s*\([^)]*\)\s*\{\s*return\s+false\s*;?\s*\}/,
+      /\bfunction\s+\w+\s*\([^)]*\)\s*\{\s*return\s+null\s*;?\s*\}/,
+      // arrow function stubs: const foo = () => []
+      /=\s*\([^)]*\)\s*=>\s*\[\s*\]/,
+      // TODO / FIXME / placeholder comments indicating unfinished logic
+      /\/\/\s*(TODO|FIXME|IMPLEMENT|PLACEHOLDER|stub|not yet implemented)/i,
+    ];
+    const stubsFound = [];
+    for (const filePath of implFiles) {
+      try {
+        const content = await fs.promises.readFile(filePath, "utf8");
+        for (const pattern of stubPatterns) {
+          if (pattern.test(content)) {
+            stubsFound.push({ file: path.basename(filePath), pattern: pattern.source.slice(0, 60) });
+            break;
+          }
+        }
+      } catch {
+        // file unreadable — skip
+      }
+    }
+    if (stubsFound.length > 0) {
+      const stubList = stubsFound.map(s => `  - ${s.file}: matched /${s.pattern.slice(0,50)}/`).join("\n");
+      const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+      log(colors.red(`  [Graph] -> Stub detection gate FAILED: ${stubsFound.length} stub(s) found.`));
+      return {
+        verifierFeedback: "FAIL",
+        coderRetryCount: newRetryCount,
+        messages: [{
+          role: "user",
+          content: `[VERIFIER STUB DETECTION]
+The following files contain stub implementations — functions that return empty arrays, false, or null without any real logic:
+
+${stubList}
+
+This violates the ANTI-STUB RULE. You MUST replace each stub with a real implementation.
+
+Examples of stubs that were detected:
+  - function getLegalMoves(piece, board) { return []; }   ← STUB — no moves calculated
+  - const isCheck = () => false;                          ← STUB — always returns false
+  - function validate() { return null; }                  ← STUB — no validation
+
+Fix: implement the actual logic. The function body must contain real computation, not just a bare return of [] / false / null.`,
+        }],
+      };
+    }
   }
 
   // Build-failure gate: if the coder ran a framework build command that exited
