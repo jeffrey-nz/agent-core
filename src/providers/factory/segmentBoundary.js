@@ -4,9 +4,12 @@ import { eventBus } from "#web/eventBus.js";
 import { closeAutomationApi } from "./automationApiTurn.js";
 import { injectRotationHandoff } from "./rotation.js";
 
+// Raised thresholds so coders have more room within a single session.
+// A typical subtask uses 4-8 messages: initial prompt + reads + write batch + verify.
+// Old: 15 (copilot365), 20 (deepseek). New: 22 / 30.
 const ROTATION_THRESHOLDS = {
-  copilot365: 15,
-  deepseek: 20,
+  copilot365: 22,
+  deepseek: 30,
 };
 
 const SUPPORTED_PROVIDERS = new Set(Object.keys(ROTATION_THRESHOLDS));
@@ -24,6 +27,22 @@ export async function handleSegmentBoundary({
     !automationState.remoteSessionId ||
     automationState.messageCount < rotationThreshold
   ) {
+    return payload;
+  }
+
+  // Defer rotation when a subtask is actively in-flight (coderNode running).
+  // Rotating mid-subtask loses all accumulated file context and forces the coder
+  // to start the subtask from scratch in a new session. Only rotate at subtask
+  // boundaries — allow up to 5 extra messages before forcing rotation anyway.
+  if (
+    automationState.subtaskActive &&
+    automationState.messageCount < rotationThreshold + 5
+  ) {
+    log(
+      colors.dim(
+        `  [Segment] Deferring rotation — subtask is active (${automationState.messageCount}/${rotationThreshold + 5} messages).`,
+      ),
+    );
     return payload;
   }
 
@@ -46,7 +65,6 @@ export async function handleSegmentBoundary({
     }
   }
 
-  // Keep the copilot365-specific event for backward compatibility
   if (providerName === "copilot365") {
     eventBus.emit("copilot365_segment_boundary", {
       segmentIndex,

@@ -266,7 +266,7 @@ async function generateReflexionLesson(state) {
 // Checks that a new Node.js/React project has the mandatory setup files in place.
 // Fired whenever package.json is among the files written in a subtask.
 // Returns an array of error strings (empty = all good).
-async function checkProjectSetup(projectDir) {
+async function checkProjectSetup(projectDir, modifiedFiles = []) {
   const errors = [];
 
   // .gitignore must exist and contain node_modules
@@ -324,10 +324,12 @@ async function checkProjectSetup(projectDir) {
     }
 
     // React projects must include eslint-plugin-react-hooks to catch useEffect dependency bugs.
-    // Missing deps in useEffect dependency arrays cause broken AI opponents, stale closures,
-    // infinite loops, and timer-cancellation bugs that are invisible to tsc.
+    // Only enforce this when package.json is being WRITTEN by the current coder turn
+    // (i.e., it was modified this subtask). For pre-existing scaffolds we skip this check
+    // so the gate doesn't block all subtasks indefinitely.
     const hasReact = !!(pkg.dependencies?.react || pkg.devDependencies?.react);
-    if (hasReact) {
+    const pkgJsonWasWrittenThisSubtask = modifiedFiles.some(f => /\/package\.json$|^package\.json$/.test(f));
+    if (hasReact && pkgJsonWasWrittenThisSubtask) {
       const hasReactHooksPlugin = !!(
         pkg.devDependencies?.["eslint-plugin-react-hooks"] ||
         pkg.dependencies?.["eslint-plugin-react-hooks"]
@@ -1852,7 +1854,7 @@ DEBUGGING STRATEGY:
           .catch(() => false)
       : false;
     if (pkgJsonExistsForGate && state.projectDir) {
-      const setupErrors = await checkProjectSetup(state.projectDir);
+      const setupErrors = await checkProjectSetup(state.projectDir, state.modifiedFiles || []);
       if (setupErrors.length > 0) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(colors.red(`  [Graph] -> Project setup gate FAILED. Retry ${newRetry}/${effectiveMaxRetries}.`));
@@ -2047,7 +2049,17 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
         const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
         return modifiedAbsSet.has(abs);
       });
-      if (!anyPlanFileTouched) {
+      // Bypass gate when all planned files already exist on disk — the coder
+      // correctly detected they were pre-created and signalled TASK_DONE without
+      // rewriting them. Let the downstream build check validate correctness.
+      const allPlannedExist = !anyPlanFileTouched && subtaskPlan.files.every((f) => {
+        const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+        try { fs.statSync(abs); return true; } catch { return false; }
+      });
+      if (allPlannedExist) {
+        log(colors.dim(`  [Graph] -> Planned-files gate: all ${subtaskPlan.files.length} planned file(s) already exist — bypassing gate.`));
+      }
+      if (!anyPlanFileTouched && !allPlannedExist) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(
           colors.red(
@@ -2152,8 +2164,19 @@ ${currentTask}${capWarning}`,
   // where the coder invents a new naming convention (e.g. .square.light) that
   // doesn't match the JSX (e.g. className="light-square"). Only fires once per
   // subtask to avoid consuming all retries on the consistency check alone.
-  const cssFilesWritten = (state.modifiedFiles || []).filter(f => f.endsWith('.css'));
+  // Only check CSS files that are new to THIS subtask — exclude any that were
+  // written in a previous subtask (tracked in allModifiedFiles). This prevents
+  // leftover CSS from a prior subtask (that nextSubtaskNode didn't commit in time)
+  // from triggering the gate erroneously in the next subtask's verifier.
+  const prevSubtaskFiles = new Set(state.allModifiedFiles || []);
+  const cssFilesWritten = (state.modifiedFiles || []).filter(
+    f => f.endsWith('.css') && !prevSubtaskFiles.has(f)
+  );
   if (cssFilesWritten.length > 0) {
+    // If JSX/TSX was also written in this same subtask, the coder authored both
+    // files and knows the class names — skip the consistency gate entirely.
+    const jsxAlsoWritten = (state.modifiedFiles || []).some(f => /\.(jsx|tsx)$/.test(f));
+
     // Check if the last coder response included reading a JSX/TSX file.
     // This is the evidence that the coder actually verified class name consistency.
     // Pattern: JSON tool call with "read_file" and a .jsx/.tsx path.
@@ -2161,7 +2184,7 @@ ${currentTask}${capWarning}`,
     const readJsxEvidence = /"read_file"[^}]{1,200}\.(jsx|tsx)/.test(lastResp) ||
       /read_file[^\n]{1,100}\.(jsx|tsx)/.test(lastResp);
 
-    if (!readJsxEvidence) {
+    if (!readJsxEvidence && !jsxAlsoWritten) {
       const jsxPaths = (state.modifiedFiles || []).filter(f => /\.(jsx|tsx)$/.test(f));
       const jsxHint = jsxPaths.length > 0
         ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
@@ -2273,9 +2296,12 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
   // Catches bundling errors, import path issues, and missing exports that tsc --noEmit misses.
   // Runs only when: package.json exists AND build script calls tsc or vite build.
   // Also catches broken package.json (missing scripts) when vite.config.ts is present.
-  // Skipped on early subtasks (index < 3) to avoid blocking scaffolding.
+  // Skipped on early subtasks to avoid blocking scaffolding.
+  // For new_project tasks the scaffold is pre-existing, so real code starts at subtask 1 —
+  // lower the threshold so errors get caught one subtask earlier.
   const subtaskIndex = state.currentSubtaskIndex ?? 0;
-  if (state.projectDir && subtaskIndex >= 3) {
+  const buildGateThreshold = state.taskType === "new_project" ? 1 : 3;
+  if (state.projectDir && subtaskIndex >= buildGateThreshold) {
     try {
       const pkgPath = path.join(state.projectDir, "package.json");
       const pkgRaw = await fs.promises.readFile(pkgPath, "utf8").catch(() => null);
@@ -2373,6 +2399,48 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
       }
     } catch (buildCheckErr) {
       log(colors.dim(`  [Verifier] Build gate skipped: ${buildCheckErr.message?.slice(0, 80)}`));
+    }
+  }
+
+  // App.tsx regression gate: for new_project / game tasks, detect when App.tsx was
+  // simplified to a placeholder render. A common failure mode: the coder rewrites
+  // App.tsx to `return <div>Chess Game</div>` to make the build pass, which eliminates
+  // all game functionality. Catch this before it is committed as a passing checkpoint.
+  if (state.taskType === "new_project" || /game|chess|board/i.test(state.messages?.[0]?.content || "")) {
+    const appTsxPath = (state.modifiedFiles || []).find(f => /\/App\.tsx$/.test(f) || /^App\.tsx$/.test(path.basename(f)));
+    if (appTsxPath) {
+      try {
+        const content = await fs.promises.readFile(appTsxPath, "utf8");
+        // A placeholder App: does not import OR render any game-specific component.
+        // Only fires when the game component file EXISTS (so subtask 1 scaffold is OK).
+        const projectDir = state.projectDir || "";
+        const hasChessBoardFile = await fs.promises.access(
+          path.join(projectDir, "src", "components", "ChessBoard.tsx")
+        ).then(() => true).catch(() => false);
+        const hasGameBoardFile = !hasChessBoardFile && await fs.promises.access(
+          path.join(projectDir, "src", "components", "GameBoard.tsx")
+        ).then(() => true).catch(() => false);
+        const gameComponentExists = hasChessBoardFile || hasGameBoardFile;
+        // Look for any component or hook that would indicate real wiring
+        const importsGame = /import[^;]+(?:ChessBoard|GameBoard|useChessGame|useGameState|useChess|useGame)\b/i.test(content);
+        const rendersGame = /<(?:ChessBoard|GameBoard)\b|(?:useChessGame|useGameState|useChess|useGame)\s*\(/i.test(content);
+        const isPlaceholder = gameComponentExists && (!importsGame || !rendersGame);
+        if (isPlaceholder) {
+          const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+          const reason = !importsGame ? "missing game component import" : "does not render game component in JSX";
+          log(colors.red(`  [Verifier] App.tsx regression detected — ${reason} (ChessBoard exists but not used). Retry ${newRetryCount}.`));
+          eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: App.tsx was simplified to a placeholder`, type: "warning" });
+          await archiveAndRevert(state);
+          return {
+            verifierFeedback: "FAIL",
+            coderRetryCount: newRetryCount,
+            messages: [{
+              role: "user",
+              content: `[VERIFIER APP.TSX REGRESSION]\n\nApp.tsx was written as a placeholder component that only renders a <div> with text. This destroys all game functionality.\n\nDO NOT write App.tsx like this:\n  export default function App() {\n    return <div>Chess Game</div>;\n  }\n\nApp.tsx MUST import and render the actual game components. If the game components (e.g. ChessBoard) don't exist yet, create them in this subtask too, or write App.tsx to import them once available:\n  import { ChessBoard } from './components/ChessBoard';\n  import { useChessGame } from './hooks/useChessGame';\n  export default function App() {\n    const game = useChessGame();\n    return <div className="app"><ChessBoard board={game.board} /></div>;\n  }\n\nFix by rewriting App.tsx with the actual game component tree.\n\nCURRENT SUBTASK:\n${currentTask}`,
+            }],
+          };
+        }
+      } catch { /* non-fatal */ }
     }
   }
 

@@ -1,5 +1,15 @@
 import { jsonrepair } from "jsonrepair";
 
+// Strip <think>...</think> and <tool-plan>...</tool-plan> blocks before parsing.
+// These reasoning blocks are for the model's internal use and don't contain tool calls.
+function stripReasoningBlocks(text) {
+  if (!text) return text;
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<tool-plan>[\s\S]*?<\/tool-plan>/gi, "");
+}
+
 function normalizeToolCall(tc) {
   const toolName =
     tc.tool ||
@@ -84,17 +94,19 @@ function extractCodeBlockObjects(text) {
 }
 
 export class StructuredOutputParser {
-  parse(text) {
+  parse(rawText) {
     const toolCalls = [];
-    if (!text) return { success: false, actions: [], error: "No text to parse" };
+    if (!rawText) return { success: false, actions: [], error: "No text to parse" };
 
-    // Strategy 0: empty-array "done" signal.
-    // Models signal completion by outputting [] (bare or in a code block).
-    // All extraction strategies below only return success when toolCalls.length > 0,
-    // so a correct [] response would fall through and trigger a spurious parse error.
-    // Only apply when no JSON tool-call object is present, to avoid false positives.
+    // Strip reasoning blocks before parsing — <think>, <thinking>, <tool-plan>
+    // are for the model's internal reasoning and don't contain tool calls.
+    const text = stripReasoningBlocks(rawText);
+
+    // Strategy 0: TASK_DONE / [] — explicit completion signals.
+    // TASK_DONE is the new preferred signal. [] is kept for backwards compatibility.
+    // Only apply when no JSON tool-call object is present.
     const hasToolCallObject = /"tool"\s*:/.test(text) || /"name"\s*:/.test(text);
-    if (!hasToolCallObject && /\[\s*\]/.test(text)) {
+    if (!hasToolCallObject && (/\bTASK_DONE\b/.test(text) || /\[\s*\]/.test(text))) {
       return { success: true, actions: [], error: null };
     }
 

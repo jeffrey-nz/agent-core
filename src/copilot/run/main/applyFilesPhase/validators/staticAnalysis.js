@@ -58,12 +58,40 @@ export async function checkStaticAnalysis(
     }
   }
 
+  // Only run ESLint if there is an explicit ESLint config in the project.
+  // ESLint ships as a Vite/React peer dep but without a config it rejects
+  // TypeScript syntax ("interface is reserved"). Require a config file to
+  // confirm the project actually intends to enforce lint rules.
+  const eslintConfigExists =
+    (await fileExists(path.join(projectDir, ".eslintrc.js"))) ||
+    (await fileExists(path.join(projectDir, ".eslintrc.cjs"))) ||
+    (await fileExists(path.join(projectDir, ".eslintrc.json"))) ||
+    (await fileExists(path.join(projectDir, ".eslintrc.yml"))) ||
+    (await fileExists(path.join(projectDir, ".eslintrc.yaml"))) ||
+    (await fileExists(path.join(projectDir, ".eslintrc"))) ||
+    (await fileExists(path.join(projectDir, "eslint.config.js"))) ||
+    (await fileExists(path.join(projectDir, "eslint.config.cjs"))) ||
+    (await fileExists(path.join(projectDir, "eslint.config.mjs")));
+
+  // Also require @typescript-eslint/parser when linting TS files, otherwise
+  // ESLint treats TypeScript syntax as invalid JavaScript.
+  const hasTypescriptParser = tsFiles.length === 0 ||
+    (await fileExists(path.join(projectDir, "node_modules", "@typescript-eslint", "parser")));
+
+  // Exclude ESLint and other tooling config files from being linted — they import
+  // plugins that may not be installed, causing false failures.
+  const LINT_EXCLUDES = /eslint\.config\.|eslint\.setup\.|\.eslintrc|vite\.config\.|jest\.config\.|babel\.config\./;
+  const lintableJs = jsFiles.filter((f) => !LINT_EXCLUDES.test(path.basename(f)));
+  const lintableTs = tsFiles.filter((f) => !LINT_EXCLUDES.test(path.basename(f)));
+
   if (
-    (jsFiles.length > 0 || tsFiles.length > 0) &&
-    (await fileExists(path.join(projectDir, "node_modules", "eslint")))
+    (lintableJs.length > 0 || lintableTs.length > 0) &&
+    (await fileExists(path.join(projectDir, "node_modules", "eslint"))) &&
+    eslintConfigExists &&
+    hasTypescriptParser
   ) {
     log(colors.dim("  [Verifier] Running ESLint check..."));
-    const filesToLint = [...jsFiles, ...tsFiles].map((f) => `"${f}"`).join(" ");
+    const filesToLint = [...lintableJs, ...lintableTs].map((f) => `"${f}"`).join(" ");
     const res = await execAsync(`npx eslint ${filesToLint}`, {
       cwd: projectDir,
     });

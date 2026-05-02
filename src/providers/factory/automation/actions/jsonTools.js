@@ -189,6 +189,65 @@ export async function buildJsonToolsFollowUp({
       });
     }
 
+    // Integrity checks for .ts/.tsx writes — append warnings directly to the
+    // write_file result rather than pushing fake tool entries. Injecting results
+    // as separate "corruption_check"/"typescript_check" tool entries caused models
+    // to attempt calling those names as real tools in the next turn.
+    if (
+      toolName === "write_file" &&
+      !isError &&
+      toolContext?.rootDir &&
+      /\.(ts|tsx)$/.test(toolParams?.path || "")
+    ) {
+      const content = toolParams?.content || "";
+      const filePath = toolParams.path;
+      const relPath = filePath.startsWith(toolContext.rootDir + "/")
+        ? filePath.slice(toolContext.rootDir.length + 1)
+        : filePath;
+
+      // 1. Fast in-process corruption detector — long lines with repeated identifiers.
+      // Corruption (interleaved AI output streams) produces lines that are unusually
+      // long because two separate lines got merged, with the same function/class name
+      // appearing twice. Short lines with repeated type names (e.g. GameState as both
+      // param and return type) are legitimate and should not trigger this gate.
+      const corruptLines = content.split("\n").filter((line) => {
+        // Must be an unusually long line — merged lines are much longer than normal
+        if (line.length < 120) return false;
+        // Must contain a 6+ char identifier repeated twice within 80 chars
+        if (!/(\b[a-zA-Z_]\w{5,}\b).{0,80}\1/.test(line)) return false;
+        if (/===|!==|==|\.test|\.match|assert|describe|it\(|class=|className/.test(line)) return false;
+        return true;
+      });
+      if (corruptLines.length >= 2) {
+        const sample = corruptLines.slice(0, 3).map((l) => `  ${l.trim().slice(0, 80)}`).join("\n");
+        log(colors.red(`  [Corruption] Interleaved-line pattern detected in ${relPath} — appending warning to write_file result.`));
+        resultStr += `\n\n⚠️ SYSTEM: CORRUPTION DETECTED in ${relPath} — ${corruptLines.length} lines contain duplicated/interleaved tokens.\n\nExamples:\n${sample}\n\nThe file was written but the content is corrupt. Rewrite the ENTIRE file with write_file using clean code.`;
+      } else {
+        // 2. TypeScript syntax check (TS1xxx parse errors only — TS2xxx need full project context).
+        try {
+          const { default: fsP } = await import("node:fs/promises");
+          const tscBin = path.join(toolContext.rootDir, "node_modules", ".bin", "tsc");
+          const nodeModulesReady = await fsP.access(tscBin).then(() => true).catch(() => false);
+
+          if (nodeModulesReady) {
+            const { execAsync } = await import("#utils/exec.js");
+            const tsResult = await execAsync(
+              `npx tsc --noEmit --allowJs --skipLibCheck --jsx react --target ES2020 --moduleResolution node "${relPath}" 2>&1 || true`,
+              { cwd: toolContext.rootDir },
+            ).catch(() => null);
+
+            if (tsResult?.stdout?.match(/error TS1\d{3}\b/)) {
+              const errorText = tsResult.stdout.slice(0, 2000);
+              log(colors.yellow(`  [TypeScript] Syntax errors in ${relPath} — appending to write_file result.`));
+              resultStr += `\n\n⚠️ SYSTEM: TypeScript syntax errors in ${relPath}:\n${errorText}\nRewrite the file to fix these syntax errors.`;
+            }
+          }
+        } catch {
+          // Non-fatal — TypeScript check failures are silently ignored.
+        }
+      }
+    }
+
     eventBus.emit("tool_call_end", {
       callId,
       tool: toolName,
@@ -202,74 +261,6 @@ export async function buildJsonToolsFollowUp({
       result: resultStr,
     });
     toolCalls.push(tc);
-
-    // Integrity checks after writing .ts/.tsx files.
-    // Both checks are advisory — they never block the write.
-    if (
-      toolName === "write_file" &&
-      !isError &&
-      toolContext?.rootDir &&
-      /\.(ts|tsx)$/.test(toolParams?.path || "")
-    ) {
-      const content = toolParams?.content || "";
-
-      // 1. Fast in-process corruption detector (no subprocess needed).
-      // Catches the "interleaved line" pattern where the model generates the same
-      // identifier/token twice on the same line — a telltale sign of doubled output.
-      // Pattern: same identifier (≥4 chars) appears twice within 60 chars on a line.
-      const corruptLines = content.split("\n").filter((line) =>
-        /(\b[a-zA-Z_]\w{3,}\b).{0,60}\1/.test(line) &&
-        // Allow legitimate repetition: comparison operators, test assertions, CSS classes
-        !/===|!==|==|\.test|\.match|assert|describe|it\(|class=/.test(line)
-      );
-      if (corruptLines.length >= 2) {
-        const sample = corruptLines.slice(0, 3).map((l) => `  ${l.trim().slice(0, 80)}`).join("\n");
-        const filePath = toolParams.path;
-        const relPath = filePath.startsWith(toolContext.rootDir + "/")
-          ? filePath.slice(toolContext.rootDir.length + 1)
-          : filePath;
-        log(colors.red(`  [Corruption] Interleaved-line pattern detected in ${relPath} — injecting warning to AI.`));
-        results.push({
-          tool: "corruption_check",
-          parameters: { path: relPath },
-          result: `⚠️ CORRUPTION DETECTED in ${relPath}: ${corruptLines.length} lines appear to have duplicated/interleaved content.\n\nExamples of corrupted lines:\n${sample}\n\nThis file was NOT written correctly. You MUST rewrite it from scratch with clean code — do not patch individual lines, rewrite the ENTIRE file with write_file.`,
-        });
-      } else {
-        // 2. TypeScript syntax check via tsc (only when no corruption already detected).
-        try {
-          const fs = await import("node:fs/promises");
-          const tscBin = path.join(toolContext.rootDir, "node_modules", ".bin", "tsc");
-          const nodeModulesReady = await fs.access(tscBin).then(() => true).catch(() => false);
-
-          if (nodeModulesReady) {
-            const { execAsync } = await import("#utils/exec.js");
-            const filePath = toolParams.path;
-            const relPath = filePath.startsWith(toolContext.rootDir + "/") || filePath.startsWith(toolContext.rootDir + "\\")
-              ? filePath.slice(toolContext.rootDir.length + 1)
-              : filePath;
-
-            const tsResult = await execAsync(
-              `npx tsc --noEmit --allowJs --skipLibCheck --jsx react --target ES2020 --moduleResolution node "${relPath}" 2>&1 || true`,
-              { cwd: toolContext.rootDir },
-            ).catch(() => null);
-
-            // Only report TS1xxx errors (syntax/parse errors) — TS2xxx are type errors
-            // that are expected on single-file checks without full project context.
-            if (tsResult?.stdout?.match(/error TS1\d{3}\b/)) {
-              const errorText = tsResult.stdout.slice(0, 2000);
-              log(colors.yellow(`  [TypeScript] Syntax errors in ${relPath} — injecting feedback to AI.`));
-              results.push({
-                tool: "typescript_check",
-                parameters: { path: relPath },
-                result: `TypeScript syntax errors in ${relPath}:\n${errorText}\nPlease rewrite the file to fix these errors.`,
-              });
-            }
-          }
-        } catch {
-          // Non-fatal — TypeScript check failures are silently ignored.
-        }
-      }
-    }
   }
 
   return formatToolResults(results);

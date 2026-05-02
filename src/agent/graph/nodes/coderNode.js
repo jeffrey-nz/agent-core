@@ -20,7 +20,7 @@ const PERSONA = personaMeta("coder");
 // Proactively detect known failure patterns in the subtask description before the
 // coder runs and inject targeted guardrails (Bai et al. 2022 — Constitutional AI).
 // Prevents entering multi-retry failure loops for well-understood antipatterns.
-function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
+function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType) {
   const hazards = [];
   const taskAndNote = `${currentTask} ${currentSubtask?.implementationNote || ""} ${currentSubtask?.constraints || ""}`;
 
@@ -79,21 +79,32 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
     }
   }
 
-  // Hazard: TypeScript verbatimModuleSyntax — type-only imports required
-  // Modern Vite/React tsconfigs have "verbatimModuleSyntax": true which requires
-  // types to be imported with `import type { ... }`, not regular `import { ... }`.
-  // This is a very common error in AI-generated TypeScript code.
+  // Hazard: TypeScript strict mode — common Vite/React tsconfig gotchas.
+  // Modern Vite/React tsconfigs enable several strict flags that AI-generated code
+  // frequently violates: verbatimModuleSyntax, noUnusedLocals, noUnusedParameters.
   if (projectType !== "swift" && /\.(ts|tsx)$/i.test(taskAndNote)) {
     hazards.push(
-      `⚠️ TYPESCRIPT HAZARD — USE import type FOR TYPE-ONLY IMPORTS\n` +
-      `This project uses "verbatimModuleSyntax": true in tsconfig which REQUIRES:\n` +
-      `  WRONG: import { Board, Position, Move } from './types';\n` +
-      `  RIGHT: import type { Board, Position, Move } from './types';\n` +
-      `Rule: if you import ONLY type aliases, interfaces, or type parameters — use import type.\n` +
-      `If a module exports both values AND types, split into separate import statements:\n` +
-      `  import { GameState } from './GameState';     // class — value import\n` +
-      `  import type { Move, Position } from './types'; // types — type import\n` +
-      `Failing to use import type causes TS1484 errors that will be caught by the verifier.`,
+      `⚠️ TYPESCRIPT STRICT-MODE HAZARDS (Vite/React tsconfig)\n` +
+      `\n` +
+      `1. TYPE-ONLY IMPORTS — use "import type" for interfaces/types:\n` +
+      `   WRONG: import { Board, Position, Move } from './types';\n` +
+      `   RIGHT: import type { Board, Position, Move } from './types';\n` +
+      `   Rule: if you import ONLY types/interfaces, use "import type". Split value+type imports.\n` +
+      `\n` +
+      `2. NO UNUSED VARIABLES — "noUnusedLocals: true" is ON:\n` +
+      `   Every declared variable, import, and const MUST be used in the same file.\n` +
+      `   WRONG: import { foo } from './utils'; (if foo is never called)\n` +
+      `   WRONG: const x = 5; (if x is never read)\n` +
+      `   FIX: Remove unused imports and variables BEFORE writing the file.\n` +
+      `\n` +
+      `3. NO UNUSED PARAMETERS — "noUnusedParameters: true" is ON:\n` +
+      `   Every function parameter MUST be used in the body, OR prefixed with _:\n` +
+      `   WRONG: function foo(a: string, b: number) { return a; } // b unused\n` +
+      `   RIGHT: function foo(a: string, _b: number) { return a; } // _b = intentionally unused\n` +
+      `\n` +
+      `4. NO IMPLICIT ANY — "strict: true" requires explicit types on all params:\n` +
+      `   WRONG: function foo(x) { ... }\n` +
+      `   RIGHT: function foo(x: string) { ... }`,
     );
   }
 
@@ -150,6 +161,28 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType) {
       `    "dependencies": { "react": "...", "react-dom": "..." },\n` +
       `    "devDependencies": { "@vitejs/plugin-react": "...", "vite": "...", "typescript": "..." } }\n` +
       `WHEN BUILD FAILS: Read the actual TypeScript errors (npm run build 2>&1), fix the TS code — do NOT fix by deleting scripts from package.json.`,
+    );
+  }
+
+  // Hazard: App.tsx regression — never simplify App.tsx to a placeholder to fix build errors.
+  // A common failure mode: the coder rewrites App.tsx to `return <div>App</div>` to clear
+  // TypeScript errors, making the build "pass" while destroying all game functionality.
+  const touchesAppTsx = (currentSubtask?.files || []).some(f => f.includes("App.tsx"))
+    || /App\.tsx/.test(taskAndNote);
+  const isNewProjectOrGame = taskType === "new_project" || isGameTask;
+  if (touchesAppTsx && isNewProjectOrGame) {
+    hazards.push(
+      `⚠️ APP.TSX REGRESSION HAZARD — Never stub out App.tsx to fix TypeScript errors!\n` +
+      `FORBIDDEN pattern: export default function App() { return <div>Chess Game</div>; }\n` +
+      `This "fixes" the build by destroying all game functionality.\n` +
+      `\n` +
+      `RULES:\n` +
+      `1. NEVER write App.tsx with a minimal placeholder body (single <div> with text).\n` +
+      `2. If App.tsx has TypeScript errors, FIX the imports and types — do NOT simplify the render.\n` +
+      `3. App.tsx MUST render the actual game components (e.g. <ChessBoard>, <GameStatus>).\n` +
+      `4. If a component doesn't exist yet (written in a later subtask), import it but render\n` +
+      `   a loading state: {chessReady ? <ChessBoard ... /> : <div>Loading...</div>}.\n` +
+      `5. Build failures → fix the TypeScript errors in the types files, NOT by removing JSX.`,
     );
   }
 
@@ -577,7 +610,7 @@ export async function coderNode(state, config) {
   // ── Constitutional AI hazard section ────────────────────────────────────────
   // Generated per-subtask from known failure patterns; injected into system prompt
   // BEFORE the scope section so the coder sees it at maximum attention weight.
-  const hazardSection = buildSubtaskHazards(currentTask, currentSubtask, state.projectType);
+  const hazardSection = buildSubtaskHazards(currentTask, currentSubtask, state.projectType, state.taskType);
 
   // ── Process Reward Model (PRM) signal ─────────────────────────────────────
   // Lightman et al. 2023 — surface a productivity signal when the prior turn
@@ -664,12 +697,9 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
       failureClassification = "FAILURE TYPE: No files written or execution tool not called - execute the required change immediately.";
     }
 
-    // After the first retry, remind the model that the <tool-plan> tag must be
-    // followed IMMEDIATELY by the JSON tool call array. The original wording
-    // ("ONLY JSON") contradicted the <tool-plan> protocol and caused models to
-    // output the plan tag alone, treating it as the entire required output.
+    // Remind the model that <think> must be followed IMMEDIATELY by tool calls.
     const jsonOnlyReminder = retryCount >= 1
-      ? `\n⚠️ MANDATORY ON RETRY: After your <tool-plan> block, you MUST IMMEDIATELY output the JSON tool call array. Example:\n<tool-plan>\nGoal: patch the file\nSteps: read_file, patch_file\n</tool-plan>\n[{"tool":"patch_file","path":"/abs/path","search_block":"...","replace_block":"..."}]\nDo NOT output the <tool-plan> tag alone — it does nothing without the following JSON array. The file is NOT written until a JSON tool call executes it.\n`
+      ? `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY. Example:\n<think>\nTask: patch the file\nFiles to write: src/App.tsx\nRead first: src/App.tsx\n</think>\n[{"tool":"read_file","path":"/abs/src/App.tsx"}]\n... (after reading) ...\n[{"tool":"patch_file","path":"/abs/src/App.tsx","search_block":"...","replace_block":"..."}]\nTASK_DONE\nDo NOT output <think> alone — it does nothing without the following JSON array.\n`
       : "";
 
     // ── Strategy Diversification ─────────────────────────────────────────────
@@ -724,9 +754,9 @@ ${progressNote}${allModifiedFilesNote}
 ${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${hazardSection}${reactScaffoldWarning}${testContractBlock}
 ${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
 Instructions:
-- [TOOL PLANNING PROTOCOL] At the very start of your response, output a brief intent block:\n<tool-plan>\nGoal: <one line — what this subtask achieves>\nSteps: <3-5 tool names in the order you plan to call them, comma-separated>\n</tool-plan>\nThen immediately proceed with the tool calls.
-- Use the appropriate tools (write_file, patch_file, read_file) via strict JSON tool calling.
-- CRITICAL - PROSE OUTPUT IS NOT A FILE WRITE: If your task requires creating or modifying a file, you MUST use a write_file or patch_file tool call. Printing file content as text in your response does NOT create the file - the content will appear in the chat and be immediately discarded. The file will NOT exist on disk. You MUST output a JSON tool call: [{"tool": "write_file", "path": "/abs/path", "content": "..."}]
+- [REASONING PROTOCOL] Start your response with a thinking block:\n<think>\nTask: what this subtask achieves\nFiles to write: [every file this subtask needs — list ALL of them]\nRead first: [files that must be read before writing, or "none"]\n</think>\nThen IMMEDIATELY output the JSON array with ALL tool calls.
+- [BATCH WRITING] Write ALL files for this subtask in ONE JSON array. Do NOT write one file, wait for results, then write the next. For a subtask with 5 files: put all 5 write_file calls in a single array. When done: output TASK_DONE.
+- CRITICAL - PROSE OUTPUT IS NOT A FILE WRITE: Writing code as text in your response does NOT create any file — it is immediately discarded. You MUST use write_file or patch_file tool calls: [{"tool": "write_file", "path": "/abs/path", "content": "..."}]
 ${diagnosticsInstruction}- Do not deviate from the current subtask.
 - NEVER write, patch, delete, or diff files inside vendor/, node_modules/, or .git/ - these directories are managed by package managers and must not be modified manually.
 - READ-AFTER-WRITE: After writing or patching any YAML, JSON, XML, or config file, immediately re-read it using read_file to verify the content - especially indentation, which is invisible in write output. Correct any formatting issues before proceeding.
@@ -770,18 +800,29 @@ ${buildAcceptanceTestDirective(state.projectType)}
     }
   }
 
-  // Raised truncation limit - C# files regularly exceed 4000 chars.
+  // Semantic context compaction: compress large tool-result blocks before the tail
+  // window. This preserves more turns in the window while staying under the context
+  // limit — analogous to Claude's context compaction. Individual file contents > 4000
+  // chars are trimmed to keep the most diagnostic parts (head + tail).
   const prunedMessages = windowedMessages.map((msg) => {
-    if (typeof msg.content === "string" && msg.content.length > 8000) {
-      return {
-        ...msg,
-        content:
-          msg.content.substring(0, 2000) +
-          `\n...[CONTENT TRUNCATED - use read_file to retrieve full content if needed]...\n` +
-          msg.content.substring(msg.content.length - 400),
-      };
+    if (typeof msg.content !== "string") return msg;
+    let content = msg.content;
+
+    // Compress large [TOOL RESULT] read_file blocks — keep first 1500 + last 300 chars
+    content = content.replace(
+      /(\[TOOL RESULT\][^\n]*read_file[^\n]*\n)([\s\S]{4000,}?)(\n\n---|\n\[TOOL)/g,
+      (_, header, body, tail) =>
+        header + body.slice(0, 1500) + `\n...[${body.length - 1800} chars omitted — use read_file to re-read if needed]...\n` + body.slice(-300) + tail
+    );
+
+    // Hard cap: any remaining block > 8000 chars
+    if (content.length > 8000) {
+      content = content.substring(0, 2000) +
+        `\n...[CONTENT TRUNCATED - use read_file to retrieve full content if needed]...\n` +
+        content.substring(content.length - 400);
     }
-    return msg;
+
+    return content === msg.content ? msg : { ...msg, content };
   });
 
   const messages = [
@@ -795,7 +836,14 @@ ${buildAcceptanceTestDirective(state.projectType)}
   let executionErrors = [];
 
   const signal = config?.signal ?? null;
-  const context = { rootDir: state.projectDir, ignore: state.ignore, allowedDirs: state.contextDirs || [], signal, projectConfig: state.project };
+  const context = {
+    rootDir: state.projectDir,
+    ignore: state.ignore,
+    allowedDirs: state.contextDirs || [],
+    signal,
+    projectConfig: state.project,
+    plannedFileCount: currentSubtask?.files?.length ?? 0,
+  };
   if (state.model) {
     const { textStream, toolCalls } = streamText({
       model: state.model,
@@ -855,11 +903,16 @@ ${buildAcceptanceTestDirective(state.projectType)}
       }
     }
 
+    // Signal to segmentBoundary that a subtask is in-flight — defer session rotation
+    // until this subtask completes to avoid mid-subtask context loss.
+    state.provider?.setSubtaskActive?.(true);
+
     let result;
     try {
       result = await state.provider.sendTurn(messages, "coder", context);
     } finally {
       clearInterval(_coderTicker);
+      state.provider?.setSubtaskActive?.(false);
     }
 
     if (!result.ok) {
@@ -950,7 +1003,7 @@ ${buildAcceptanceTestDirective(state.projectType)}
       };
     }
 
-    fullText = result.text ?? "";
+    fullText = result.text ?? result.responseText ?? "";
     resolvedTools = result.toolCalls ?? [];
 
     modifiedFiles = result.modifiedFiles ?? [];
@@ -1020,16 +1073,17 @@ ${buildAcceptanceTestDirective(state.projectType)}
     .filter(Boolean);
 
   // ── Tool Plan parsing ──────────────────────────────────────────────────────
-  // Extract the <tool-plan> block the coder outputs at the start of its response.
+  // Extract <think> or <tool-plan> block for dashboard display.
   let parsedToolPlan = null;
-  const toolPlanMatch = fullText.match(/<tool-plan>([\s\S]*?)<\/tool-plan>/i);
-  if (toolPlanMatch) {
-    const raw = toolPlanMatch[1];
-    const goalMatch = raw.match(/goal:\s*(.+)/i);
-    const stepsMatch = raw.match(/steps:\s*(.+)/i);
+  const thinkMatch = fullText.match(/<think>([\s\S]*?)<\/think>/i)
+    || fullText.match(/<tool-plan>([\s\S]*?)<\/tool-plan>/i);
+  if (thinkMatch) {
+    const raw = thinkMatch[1];
+    const taskMatch = raw.match(/task:\s*(.+)/i) || raw.match(/goal:\s*(.+)/i);
+    const filesMatch = raw.match(/files to write:\s*(.+)/i) || raw.match(/steps:\s*(.+)/i);
     parsedToolPlan = {
-      goal: goalMatch?.[1]?.trim() || "",
-      steps: stepsMatch?.[1]?.split(",").map((s) => s.trim()).filter(Boolean) || [],
+      goal: taskMatch?.[1]?.trim() || "",
+      steps: filesMatch?.[1]?.split(",").map((s) => s.trim()).filter(Boolean) || [],
       subtaskIndex: state.currentSubtaskIndex ?? 0,
       t: Date.now(),
     };

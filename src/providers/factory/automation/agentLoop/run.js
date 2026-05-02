@@ -45,6 +45,16 @@ export async function runAutomationAgentLoop({
   let consecutiveReadLoop = 0;
   const MAX_READ_LOOP_NUDGES = 2;
 
+  // ── Build-Write Loop Detection ────────────────────────────────────────────
+  // Detect when the agent rewrites the same file 3+ times without a passing
+  // build. This indicates a failed build-fix loop where the agent keeps
+  // guessing at solutions rather than reading the actual error. Inject a
+  // targeted "read the exact error" nudge to break the cycle.
+  const fileWriteCounts = new Map(); // filepath → total write count in this loop
+  let consecutiveFailedBuilds = 0;
+  let writeLoopNudgeCount = 0;
+  const MAX_WRITE_LOOP_NUDGES = 2;
+
   // ── Diagnostics Spam Detection ────────────────────────────────────────────
   // PRM signal: get_workspace_diagnostics returning SKIPPED or PASSED and being
   // called again immediately is a zero-reward action. The model sees "SKIPPED"
@@ -129,13 +139,26 @@ export async function runAutomationAgentLoop({
       continue;
     }
 
-    // ── PLAN phase: <tool-plan> without tool calls recovery ─────────────────────
+    // ── TASK_DONE signal — clean exit from any phase ───────────────────────────
+    // The new preferred completion signal. Models output TASK_DONE when all files
+    // for the current subtask are written. Detected here (before phase checks) so
+    // it exits the loop regardless of phase state.
+    {
+      const rawText = String(state.responseText || "");
+      const hasDone = /\bTASK_DONE\b/.test(rawText);
+      if (hasDone && !parsed.hasActivity) {
+        log(colors.dim(`  [Protocol] ${state.label}: TASK_DONE signal received — exiting loop.`));
+        state.madeProgress = state.madeProgress || true;
+        break;
+      }
+    }
+
+    // ── PLAN phase: reasoning block without tool calls recovery ──────────────
     // isWritePhase(PLAN) === false, so the main recovery block below never fires
-    // for the initial coder response. If the model outputs <tool-plan> with no JSON
-    // array in PLAN phase, the loop spins silently until maxSteps. Catch it here.
-    // Also catches [] (empty "done" signal) and plain prose — the model outputting
-    // [] in PLAN phase means it thinks the work is already done (due to accumulated
-    // chat history). Force it to start writing immediately.
+    // for the initial coder response. If the model outputs <think>/<tool-plan> with
+    // no JSON array in PLAN phase, the loop spins silently until maxSteps. Catch it.
+    // Also catches [] / TASK_DONE before any writes — the model thinks the work is
+    // already done due to accumulated chat history. Force it to start writing.
     if (
       state.phase === SESSION_PHASES.PLAN &&
       state.requireWriteFile &&
@@ -143,13 +166,14 @@ export async function runAutomationAgentLoop({
       !parsed.hasActivity
     ) {
       const rawText = String(state.responseText || "");
-      if (rawText.includes("<tool-plan>") && !rawText.includes("[{")) {
+      const hasReasoningBlock = (rawText.includes("<think>") || rawText.includes("<tool-plan>")) && !rawText.includes("[{");
+      if (hasReasoningBlock) {
         consecutiveToolPlan++;
 
         if (consecutiveToolPlan >= MAX_TOOL_PLAN_RETRIES) {
           log(
             colors.red(
-              `\n[Automation API] ${state.label}: <tool-plan> without tool calls after ${MAX_TOOL_PLAN_RETRIES} recovery attempts (PLAN phase) — aborting.`,
+              `\n[Automation API] ${state.label}: reasoning block without tool calls after ${MAX_TOOL_PLAN_RETRIES} recovery attempts (PLAN phase) — aborting.`,
             ),
           );
           state.aborted = true;
@@ -158,17 +182,16 @@ export async function runAutomationAgentLoop({
 
         log(
           colors.yellow(
-            `  [Protocol] ${state.label}: <tool-plan> tag with no JSON tool calls in PLAN phase — requesting continuation (${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}).`,
+            `  [Protocol] ${state.label}: reasoning block with no JSON tool calls in PLAN phase — requesting continuation (${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}).`,
           ),
         );
 
         state.responseText = await state.send(
           state.remoteSessionId,
           `[TOOL CALLS MISSING — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
-            `Your <tool-plan> block was received and logged, but you did NOT follow it with any JSON tool calls.\n` +
-            `The plan has NOT been executed — no files were read or written.\n\n` +
-            `Continue IMMEDIATELY with the JSON tool call array that executes the first steps of your plan.\n` +
-            `Do NOT repeat the <tool-plan> tag. Output only the tool calls (use real paths under ${state.rootDir}):\n` +
+            `Your reasoning block was received but you did NOT follow it with any JSON tool calls.\n` +
+            `No files were read or written.\n\n` +
+            `Output the tool call array NOW (use real paths under ${state.rootDir}):\n` +
             `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]`,
           `${state.label} [toolplan-recovery ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
         );
@@ -235,6 +258,8 @@ export async function runAutomationAgentLoop({
           } else if (/^(write_file|patch_file|apply_diff|delete_file|move_file)$/.test(toolName)) {
             fileReadCounts.delete(fp);
             consecutiveReadLoop = 0; // reset on any write
+            // Track write counts for build-write loop detection
+            fileWriteCounts.set(fp, (fileWriteCounts.get(fp) || 0) + 1);
           }
         }
       }
@@ -302,21 +327,18 @@ export async function runAutomationAgentLoop({
 
       consecutiveParseErrors = 0;
 
-      // ── <tool-plan> without execution recovery ─────────────────────────────
-      // The coder protocol instructs models to output <tool-plan>...</tool-plan>
-      // FOLLOWED immediately by a JSON tool call array. When a model outputs ONLY
-      // the plan tag (no "[{" JSON array), detect it here and ask it to continue.
-      // Not gated by !madeProgress — plan-without-execution can happen at any
-      // point in the session, not just before the first tool call.
+      // ── reasoning block without tool calls recovery ───────────────────────
+      // Models sometimes output <think>/<tool-plan> without following with JSON.
+      // Detect and recover. Not gated by !madeProgress — can happen any time.
       {
         const rawText = String(state.responseText || "");
-        if (rawText.includes("<tool-plan>") && !rawText.includes("[{")) {
+        if ((rawText.includes("<think>") || rawText.includes("<tool-plan>")) && !rawText.includes("[{")) {
           consecutiveToolPlan++;
 
           if (consecutiveToolPlan >= MAX_TOOL_PLAN_RETRIES) {
             log(
               colors.red(
-                `\n[Automation API] ${state.label}: <tool-plan> without tool calls after ${MAX_TOOL_PLAN_RETRIES} recovery attempts — aborting.`,
+                `\n[Automation API] ${state.label}: reasoning block without tool calls after ${MAX_TOOL_PLAN_RETRIES} recovery attempts — aborting.`,
               ),
             );
             state.aborted = true;
@@ -325,17 +347,16 @@ export async function runAutomationAgentLoop({
 
           log(
             colors.yellow(
-              `  [Protocol] ${state.label}: <tool-plan> tag with no JSON tool calls — requesting continuation (${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}).`,
+              `  [Protocol] ${state.label}: reasoning block with no JSON tool calls — requesting continuation (${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}).`,
             ),
           );
 
           state.responseText = await state.send(
             state.remoteSessionId,
             `[TOOL CALLS MISSING — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
-              `Your <tool-plan> block was received and logged, but you did NOT follow it with any JSON tool calls.\n` +
-              `The plan has NOT been executed — no files were read or written.\n\n` +
-              `Continue IMMEDIATELY with the JSON tool call array that executes the first steps of your plan.\n` +
-              `Do NOT repeat the <tool-plan> tag. Use real paths under ${state.rootDir}:\n` +
+              `Your reasoning block was received, but you did NOT follow it with any JSON tool calls.\n` +
+              `No files were read or written.\n\n` +
+              `Output the JSON tool call array NOW. Use real paths under ${state.rootDir}:\n` +
               `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]`,
             `${state.label} [toolplan-recovery ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
           );
@@ -539,16 +560,26 @@ export async function runAutomationAgentLoop({
       }
 
       // ── Placeholder-path detection (BEFORE executeStep) ─────────────────────
-      // If the model copies the example path from a recovery hint (e.g. /abs/path)
-      // instead of using the real project path, intercept it here and inject a
-      // correction rather than executing then blocking at the dispatcher level.
+      // If the model uses a wrong/placeholder path (e.g. /abs/path, your-file.jsx,
+      // relative paths, or any path outside the project root), intercept and correct.
       {
-        const PLACEHOLDER_RE = /^\/abs\//;
+        const isWrongPath = (p) => {
+          if (!p) return false;
+          // Must be an absolute path under rootDir (or one of the allowed dirs)
+          if (!p.startsWith("/")) return true; // relative path
+          if (state.rootDir && !p.startsWith(state.rootDir)) return true; // outside project
+          return false;
+        };
+        // Only check write_file/patch_file calls — reads may legitimately point elsewhere
+        const writeToolNames = new Set(["write_file", "patch_file"]);
+        const writeCalls = parsed.jsonToolCalls.filter(tc =>
+          writeToolNames.has(tc.tool || tc.name || "")
+        );
         const allPlaceholder =
-          parsed.jsonToolCalls.length > 0 &&
-          parsed.jsonToolCalls.every((tc) => {
+          writeCalls.length > 0 &&
+          writeCalls.every((tc) => {
             const p = tc.path || tc.args?.path || tc.input?.path || "";
-            return PLACEHOLDER_RE.test(p);
+            return isWrongPath(p);
           });
         if (allPlaceholder) {
           consecutiveProse++;
@@ -557,15 +588,16 @@ export async function runAutomationAgentLoop({
             state.aborted = true;
             break;
           }
-          log(colors.yellow(`  [Protocol] ${state.label}: all tool calls use placeholder /abs/ path — injecting correction (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
+          const badPath = (writeCalls[0]?.path || writeCalls[0]?.args?.path || "?");
+          log(colors.yellow(`  [Protocol] ${state.label}: write_file path "${badPath}" is outside project — injecting correction (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
           state.responseText = await state.send(
             state.remoteSessionId,
             `[WRONG PATH — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
-              `You used "/abs/path/..." which is a documentation placeholder, not a real file path.\n` +
+              `You used "${badPath}" which is not under the project root.\n` +
               `The actual project is at: ${state.rootDir}\n\n` +
-              `Replace the path with a real file path under ${state.rootDir}, for example:\n` +
-              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/Calculator.jsx", "content": "..." }\n]\n\n` +
-              `Do NOT use /abs/path. Use the real project path shown above.`,
+              `All file paths MUST start with ${state.rootDir}, for example:\n` +
+              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/types.ts", "content": "..." }\n]\n\n` +
+              `Use ONLY absolute paths that start with ${state.rootDir}.`,
             `${state.label} [placeholder-path ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
           );
           state.consecutiveNoActivity = 0;
@@ -603,7 +635,7 @@ export async function runAutomationAgentLoop({
                   `Calling it again will return the same result.\n\n` +
                   `You MUST finalize this subtask now:\n` +
                   `1. If there are more files to write for this subtask, write them immediately with write_file.\n` +
-                  `2. If all files have been written, output [] to signal subtask completion.\n\n` +
+                  `2. If all files have been written, output: TASK_DONE\n\n` +
                   `Do NOT call get_workspace_diagnostics again.`,
                 `${state.label} [diagnostics-finalize]`,
               );
@@ -643,6 +675,61 @@ export async function runAutomationAgentLoop({
             `${state.label} [read-loop ${consecutiveReadLoop}/${MAX_READ_LOOP_NUDGES}]`,
           );
           loopedFiles.forEach(([f]) => fileReadCounts.delete(f)); // reset after nudge
+          state.consecutiveNoActivity = 0;
+          continue;
+        }
+      }
+
+      // ── Build-Write Loop nudge (check AFTER executeStep) ──────────────────
+      // If the agent rewrites the same file 3+ times AND a build command ran
+      // and failed in this loop, it's stuck in a guess-and-rewrite cycle.
+      // Inject a targeted "read the EXACT error" message to break it.
+      if (state.requireWriteFile && !state.requireTools && writeLoopNudgeCount < MAX_WRITE_LOOP_NUDGES) {
+        // Track build outcomes from the response text
+        const hasBuildCall = (parsed.jsonToolCalls || []).some((tc) => {
+          const cmd = tc.args?.command || tc.input?.command || "";
+          return (tc.tool || tc.name || "").toLowerCase() === "execute_bash" &&
+            /npm run build|tsc\b/.test(cmd);
+        });
+        if (hasBuildCall) {
+          const buildPassed = !/(?:error TS\d|Error:|FAILED|✗|× )/.test(state.responseText || "");
+          if (buildPassed) {
+            consecutiveFailedBuilds = 0;
+            fileWriteCounts.clear(); // successful build resets the write-loop counter
+          } else {
+            consecutiveFailedBuilds++;
+          }
+        }
+
+        const loopedWrites = [...fileWriteCounts.entries()].filter(([, n]) => n >= 3);
+        if (loopedWrites.length > 0 && consecutiveFailedBuilds >= 2) {
+          writeLoopNudgeCount++;
+          consecutiveFailedBuilds = 0;
+          loopedWrites.forEach(([f]) => fileWriteCounts.set(f, 0)); // partial reset
+          const fileList = loopedWrites
+            .map(([f, n]) => `  "${path.basename(f)}" (written ${n}x)`)
+            .join("\n");
+          log(colors.yellow(
+            `  [Protocol] ${state.label}: build-write loop detected (${loopedWrites.length} file(s)) — injecting targeted build-error nudge (${writeLoopNudgeCount}/${MAX_WRITE_LOOP_NUDGES}).`,
+          ));
+          state.responseText = await state.send(
+            state.remoteSessionId,
+            `[BUILD-WRITE LOOP DETECTED — nudge ${writeLoopNudgeCount}/${MAX_WRITE_LOOP_NUDGES}]\n\n` +
+              `You have rewritten the following file(s) multiple times but the build is still failing:\n${fileList}\n\n` +
+              `Rewriting the entire file repeatedly does NOT fix type errors — you need to target the EXACT error.\n\n` +
+              `REQUIRED APPROACH:\n` +
+              `1. Run: [{"tool":"execute_bash","command":"npm run build 2>&1 | head -30"}]\n` +
+              `2. READ the output — find the EXACT error line (e.g. "error TS2339: Property 'X' does not exist")\n` +
+              `3. Use patch_file to fix ONLY the specific line(s) that caused the error\n` +
+              `4. Do NOT rewrite the entire file — use the smallest possible patch\n\n` +
+              `Common TypeScript errors in strict Vite projects:\n` +
+              `• TS2339: Property does not exist → check interface/type definition matches usage\n` +
+              `• TS7006: Parameter implicitly has 'any' → add type annotation\n` +
+              `• TS6133: Declared but never read → remove unused variables (noUnusedLocals is ON)\n` +
+              `• TS6192: All imports unused → remove the import statement\n` +
+              `• TS2305: Module has no exported member → check the export name in the source file`,
+            `${state.label} [build-write-loop ${writeLoopNudgeCount}/${MAX_WRITE_LOOP_NUDGES}]`,
+          );
           state.consecutiveNoActivity = 0;
           continue;
         }

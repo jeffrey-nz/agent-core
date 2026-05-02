@@ -1,5 +1,43 @@
 const COPILOT_365_PROVIDER = "copilot365";
 
+// Build tool schema with actual rootDir paths so the model doesn't invent placeholders.
+function buildCoreTools(rootDir) {
+  const p = rootDir || "/project";
+  return `read_file      | {"tool":"read_file","path":"${p}/src/file.ts"}
+list_dir       | {"tool":"list_dir","path":"${p}"}
+find_file      | {"tool":"find_file","name":"*.ts"}  or  {"tool":"find_file","path":"${p}/src"}
+grep           | {"tool":"grep","pattern":"<regex>","path":"${p}/src"}
+outline_file   | {"tool":"outline_file","path":"${p}/src/file.ts"}
+write_file     | {"tool":"write_file","path":"${p}/src/MyFile.tsx","content":"<full file content>"}
+patch_file     | {"tool":"patch_file","path":"${p}/src/file.ts","search_block":"<exact old text>","replace_block":"<new text>"}
+apply_diff     | {"tool":"apply_diff","diff_content":"--- a/rel\\n+++ b/rel\\n@@ ... @@\\n-old\\n+new"}
+delete_file    | {"tool":"delete_file","path":"${p}/src/file.ts"}
+execute_bash   | {"tool":"execute_bash","command":"<cmd>"}`;
+}
+
+const EXTENDED_TOOLS = `
+http_request         | {"tool":"http_request","url":"...","method":"GET"}
+run_npm              | {"tool":"run_npm","command":"install"}
+git_push             | {"tool":"git_push"}
+git_branch           | {"tool":"git_branch","name":"feature/my-branch"}
+github_create_issue  | {"tool":"github_create_issue","title":"Bug: ...","labels":["bug"]}
+github_update_issue  | {"tool":"github_update_issue","issue_number":42,"comment":"Fixed"}
+github_get_issues    | {"tool":"github_get_issues"}
+docs_write_page      | {"tool":"docs_write_page","page":"Architecture","content":"# ..."}
+github_move_card     | {"tool":"github_move_card","issue_number":42,"column":"Done"}
+github_trigger_workflow | {"tool":"github_trigger_workflow","workflow":"deploy.yml"}
+run_composer         | {"tool":"run_composer","command":"update -W"}
+run_phpunit          | {"tool":"run_phpunit"}`;
+
+function buildReadOnlyTools(rootDir) {
+  const p = rootDir || "/project";
+  return `read_file    | [{"tool":"read_file","path":"${p}/src/file.ts"}]
+list_dir     | [{"tool":"list_dir","path":"${p}"}]
+find_file    | [{"tool":"find_file","name":"*.ts"}]
+grep         | [{"tool":"grep","pattern":"...","path":"${p}/src"}]
+outline_file | [{"tool":"outline_file","path":"${p}/src/file.ts"}]`;
+}
+
 export function buildAutomationPromptText({
   messages,
   rootDir,
@@ -9,15 +47,11 @@ export function buildAutomationPromptText({
   providerName = null,
   allowedDirs = [],
 }) {
-  // "scoping" = single-turn conversational response (planValidator/critic) — no tool protocol.
-  // "debugging" / "readOnly" = multi-turn read-only agent — read-only tool list appended.
-  // anything else = full write-capable agent protocol.
   const isScoping = interactionMode === "scoping";
   const isDebugging = interactionMode === "debugging";
   const isReadOnly = interactionMode === "readOnly";
   const isCopilot365 = providerName === COPILOT_365_PROVIDER;
 
-  // Build the canonical list of permitted root prefixes.
   const allAllowed = Array.from(
     new Set([rootDir, ...allowedDirs].filter(Boolean)),
   );
@@ -33,79 +67,59 @@ export function buildAutomationPromptText({
 
       if (m.role === "system" && rootDir && !isScoping) {
         if (isDebugging || isReadOnly) {
-          // Compact read-only protocol for analyst/debugger/scoper/researcher turns.
-          // No write tools, no execute_bash — prevents the model from calling echo/exit
-          // instead of reading files.
           content += `
 
 Project root: ${rootDir}
 
-TOOLS (read-only — do NOT write files or run bash commands):
-- read_file    : [{ "tool": "read_file", "path": "${rootDir}/src/filename.ts" }]
-- list_dir     : [{ "tool": "list_dir", "path": "${rootDir}/src" }]
-- find_file    : [{ "tool": "find_file", "name": "*.ts" }]
-- grep         : [{ "tool": "grep", "pattern": "...", "path": "${rootDir}/src" }]
-- outline_file : [{ "tool": "outline_file", "path": "${rootDir}/src/filename.ts" }]
+TOOLS (read-only — do NOT write files or run bash):
+${buildReadOnlyTools(rootDir)}
 
 Output tool calls as a single JSON array. ${pathsRule}. Do NOT modify files.`;
         } else {
           const diagnosticsTool = isCopilot365
             ? ""
-            : `- get_workspace_diagnostics : { "tool": "get_workspace_diagnostics" }\n`;
-          const diagnosticsRule = isCopilot365
-            ? ""
-            : `- Run get_workspace_diagnostics after writing code to catch errors\n`;
+            : `get_workspace_diagnostics | {"tool":"get_workspace_diagnostics"}\n`;
 
           content += `
 
 Project root: ${rootDir}
 
-AGENTIC FILE PROTOCOL:
-You MUST interact with the filesystem exclusively via the JSON tool call format below.
-Do NOT output raw text file contents. Only use JSON tool calls.
+## TOOL SCHEMA
+${buildCoreTools(rootDir)}
+${diagnosticsTool}${EXTENDED_TOOLS}
 
-AVAILABLE TOOLS (use these exact names):
-- read_file       : { "tool": "read_file", "path": "${rootDir}/src/filename.ts" }
-- list_dir        : { "tool": "list_dir", "path": "${rootDir}/src" }
-- find_file       : { "tool": "find_file", "name": "*.ts" } or { "tool": "find_file", "path": "${rootDir}/src" } (name optional — omit to list all files in path)
-- write_file      : { "tool": "write_file", "path": "${rootDir}/src/filename.ts", "content": "..." }
-- patch_file      : { "tool": "patch_file", "path": "${rootDir}/src/filename.ts", "search_block": "old", "replace_block": "new" }
-- apply_diff      : { "tool": "apply_diff", "diff_content": "--- a/rel/path\n+++ b/rel/path\n@@ ... @@\n-old\n+new" }
-- delete_file     : { "tool": "delete_file", "path": "${rootDir}/src/filename.ts" }
-- execute_bash    : { "tool": "execute_bash", "command": "..." }
-- grep            : { "tool": "grep", "pattern": "...", "path": "${rootDir}/src" }
-- outline_file    : { "tool": "outline_file", "path": "${rootDir}/src/filename.ts" }
-${diagnosticsTool}- http_request    : { "tool": "http_request", "url": "...", "method": "GET" }
-- run_composer    : { "tool": "run_composer", "command": "update -W" }
-- run_phpunit     : { "tool": "run_phpunit" }
-- run_npm         : { "tool": "run_npm", "command": "install" }
-- git_push        : { "tool": "git_push" }
-- git_branch      : { "tool": "git_branch", "name": "feature/my-branch" }
-- github_create_issue   : { "tool": "github_create_issue", "title": "Bug: ...", "labels": ["bug"] }
-- github_update_issue   : { "tool": "github_update_issue", "issue_number": 42, "comment": "Fixed in this session" }
-- github_get_issues     : { "tool": "github_get_issues" }
-- docs_write_page       : { "tool": "docs_write_page", "page": "Architecture", "content": "# Architecture\n..." }
-- github_move_card      : { "tool": "github_move_card", "issue_number": 42, "column": "Done" }
-- github_trigger_workflow : { "tool": "github_trigger_workflow", "workflow": "deploy.yml" }
+## BATCH EXECUTION PROTOCOL
 
-TOOL CALL FORMAT — output ALL calls in ONE single JSON array (never split into multiple arrays or code blocks):
+Think before acting. Before your tool calls, output a reasoning block:
+<think>
+Task: what this response must accomplish
+Files to write: [list every file]
+Read first: [list files that must be read before writing, or "none"]
+</think>
+
+Then output ALL tool calls for this response in ONE JSON array:
 [
-  { "tool": "list_dir", "path": "${rootDir}" },
-  { "tool": "read_file", "path": "${rootDir}/src/filename.ts" }
+  {"tool":"write_file","path":"${rootDir}/src/ComponentA.tsx","content":"...full content..."},
+  {"tool":"write_file","path":"${rootDir}/src/ComponentB.tsx","content":"...full content..."},
+  {"tool":"write_file","path":"${rootDir}/src/utils.ts","content":"...full content..."}
 ]
-CRITICAL: Every tool call in your response MUST be inside this single array. Do NOT wrap in markdown code fences. Do NOT output separate arrays.
 
-CRITICAL RULES:
+When all files for the current task are written, output: TASK_DONE
+
+## RULES
 - ${pathsRule}
-- Always read a file before editing it (unless this is a NEW PROJECT task — see below)
-- NEVER use write_file, patch_file, apply_diff, delete_file, or move_file on any path containing vendor/, node_modules/, or .git/
-- NEVER use execute_bash to write file contents (e.g. cat >, tee, echo > file). ALWAYS use write_file or patch_file to create or modify files — bash writes are invisible to the verification system
-${diagnosticsRule}
-${dirTree ? `DIRECTORY LISTING:\n${dirTree}` : ""}
+- ALL tool calls in ONE array per response — never split into multiple arrays
+- Do NOT wrap the array in markdown code fences
+- For a task requiring 5 files: write all 5 in ONE array
+- For a read-then-write task: batch the reads first, get results, then batch the writes
+- Never use execute_bash to write file contents — use write_file
+- Never modify vendor/, node_modules/, or .git/
+- Always read a file before patching it (patch_file requires exact search_block match)
+${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}
 
 ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
-  ? "This is a NEW PROJECT task — start IMMEDIATELY with write_file to create the file. Do NOT list_dir or read_file first. There is nothing to read — create the file now."
-  : "Start with `list_dir` or `read_file` to understand the codebase before making changes."}`;
+  ? "⚡ NEW PROJECT: Write ALL files immediately. Do NOT list_dir or read_file first — nothing exists yet."
+  : ""}`;
         }
       }
 
@@ -113,7 +127,6 @@ ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
     })
     .join("\n\n---\n\n");
 
-  // Compact large tool-output blocks if prompt exceeds 80K chars (DeepSeek only)
   if (fullPrompt.length > 80000 && providerName === "deepseek") {
     return compactPromptForDeepSeek(fullPrompt);
   }
@@ -123,7 +136,7 @@ ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
 function compactPromptForDeepSeek(prompt) {
   let compacted = prompt;
 
-  // Truncate any file content block over 3000 chars to first 1500 + last 200
+  // Pass 1: truncate large file-content blocks (tool results > 3000 chars)
   compacted = compacted.replace(
     /(content of [^\n]{0,100}\n)([\s\S]{3000,}?)(\n---|\n\[)/g,
     (match, header, body, tail) => {
@@ -134,8 +147,7 @@ function compactPromptForDeepSeek(prompt) {
     }
   );
 
-  // More aggressive: if still > 80K, truncate individual [TOOL RESULT] blocks
-  // that contain large read_file tool results
+  // Pass 2: if still > 80K, truncate large [TOOL RESULT] blocks
   if (compacted.length > 80000) {
     compacted = compacted.replace(
       /(\[TOOL RESULT\][^\n]*\n)([\s\S]{2000,}?)(\n\n---)/g,

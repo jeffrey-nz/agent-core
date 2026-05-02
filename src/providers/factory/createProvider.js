@@ -16,6 +16,7 @@ export async function createProvider(providerName, opts = {}) {
     messageCount: 0,
     lastResponseText: "",
     segmentIndex: 0,
+    subtaskActive: false, // set true by coderNode to defer mid-subtask rotation
     eventBus,
   };
 
@@ -45,6 +46,10 @@ export async function createProvider(providerName, opts = {}) {
         pendingMode = mode;
       }
       return true;
+    },
+
+    setSubtaskActive(active) {
+      automationState.subtaskActive = Boolean(active);
     },
 
     // Placeholder, will be replaced after createTurnExecutor
