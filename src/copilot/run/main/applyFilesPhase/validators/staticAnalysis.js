@@ -71,6 +71,26 @@ export async function checkStaticAnalysis(
       errors.push(`ESLint Error:\n${res.stdout || res.stderr}`);
   }
 
+  // Chess/game antipattern check: detect legalMoves={[]} hardcoded empty array in JSX.
+  // This is a common bug where App.tsx wires the ChessBoard but passes empty moves,
+  // breaking legal-move highlighting. Check all TSX files in the project.
+  if (tsFiles.length > 0) {
+    try {
+      const { readFile: fsReadFile } = await import("node:fs/promises");
+      for (const f of tsFiles.filter(f => f.endsWith(".tsx"))) {
+        const content = await fsReadFile(f, "utf8").catch(() => "");
+        // Detect: legalMoves={[]} pattern (hardcoded empty array passed as prop)
+        if (/legalMoves=\{(\[\]|new Array\(\)|Array\.from\(\))\}/i.test(content)) {
+          errors.push(
+            `Chess Game Integration Error in ${f.replace(projectDir + "/", "")}: ` +
+            `legalMoves is hardcoded to [] — it must be the legalMoves state returned by useChessGame hook. ` +
+            `Fix: ensure useChessGame returns legalMoves and pass it as legalMoves={legalMoves}.`
+          );
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   if (
     phpFiles.length > 0 &&
     (await fileExists(path.join(projectDir, "phpstan.neon")))

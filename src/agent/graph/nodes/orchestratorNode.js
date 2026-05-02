@@ -125,9 +125,13 @@ function classifyByKeywords(taskText) {
   }
 
   // New project: build a brand-new app/game/tool from scratch.
+  // Exclusion: "existing project", "current codebase", "add to/extend/update/fix/change" imply
+  // modifying existing code. "already" alone is NOT an exclusion — "already has node_modules"
+  // is common in new project prompts and doesn't mean the code already exists.
   if (
     /\b(build|create|make|develop|implement|scaffold|generate)\b.{0,60}\b(app|application|game|tool|project|dashboard|website|site|calculator|chess|todo|weather|snake|tetris|widget)\b/i.test(taskText) &&
-    !/\b(existing|current|already|add to|extend|update|fix|change)\b/i.test(taskText)
+    !/\b(existing|current)\b.{0,20}\b(project|codebase|code|app|file|feature)\b/i.test(taskText) &&
+    !/\b(add to|extend|update|fix|change)\b/i.test(taskText)
   ) {
     return { taskType: "new_project", rationale: "Keyword match: building a new application from scratch" };
   }
