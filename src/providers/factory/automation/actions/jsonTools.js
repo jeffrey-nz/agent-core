@@ -207,16 +207,15 @@ export async function buildJsonToolsFollowUp({
 
       // 1. Fast in-process corruption detector — long lines with repeated identifiers.
       // Corruption (interleaved AI output streams) produces lines that are unusually
-      // long because two separate lines got merged, with the same function/class name
-      // appearing twice. Short lines with repeated type names (e.g. GameState as both
-      // param and return type) are legitimate and should not trigger this gate.
+      // long because two separate lines got merged, with the same long function/class
+      // name appearing 3+ times. Legitimate code rarely repeats a 12-char identifier
+      // 3 times on a single line that is 200+ chars.
       const corruptLines = content.split("\n").filter((line) => {
-        // Must be an unusually long line — merged lines are much longer than normal
-        if (line.length < 120) return false;
-        // Must contain a 6+ char identifier repeated twice within 80 chars
-        if (!/(\b[a-zA-Z_]\w{5,}\b).{0,80}\1/.test(line)) return false;
-        if (/===|!==|==|\.test|\.match|assert|describe|it\(|class=|className/.test(line)) return false;
-        return true;
+        if (line.length < 200) return false;
+        const tokens = [...line.matchAll(/\b([a-zA-Z_]\w{11,})\b/g)].map((m) => m[1]);
+        const counts = {};
+        tokens.forEach((t) => { counts[t] = (counts[t] || 0) + 1; });
+        return Object.values(counts).some((v) => v >= 3);
       });
       if (corruptLines.length >= 2) {
         const sample = corruptLines.slice(0, 3).map((l) => `  ${l.trim().slice(0, 80)}`).join("\n");
