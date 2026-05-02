@@ -27,7 +27,7 @@ export function buildAutomationPromptText({
     ? `Paths MUST be absolute and start with one of:\n${allAllowed.map((d) => `  - ${d}`).join("\n")}`
     : `Paths MUST be absolute and start with ${rootDir}`;
 
-  return messages
+  const fullPrompt = messages
     .map((m) => {
       let content = m.content;
 
@@ -112,4 +112,41 @@ ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
       return `[${String(m.role || "user").toUpperCase()}]\n${content}`;
     })
     .join("\n\n---\n\n");
+
+  // Compact large tool-output blocks if prompt exceeds 80K chars (DeepSeek only)
+  if (fullPrompt.length > 80000 && providerName === "deepseek") {
+    return compactPromptForDeepSeek(fullPrompt);
+  }
+  return fullPrompt;
+}
+
+function compactPromptForDeepSeek(prompt) {
+  let compacted = prompt;
+
+  // Truncate any file content block over 3000 chars to first 1500 + last 200
+  compacted = compacted.replace(
+    /(content of [^\n]{0,100}\n)([\s\S]{3000,}?)(\n---|\n\[)/g,
+    (match, header, body, tail) => {
+      if (body.length > 3000) {
+        return header + body.slice(0, 1500) + "\n...[truncated for context efficiency]...\n" + body.slice(-200) + tail;
+      }
+      return match;
+    }
+  );
+
+  // More aggressive: if still > 80K, truncate individual [TOOL RESULT] blocks
+  // that contain large read_file tool results
+  if (compacted.length > 80000) {
+    compacted = compacted.replace(
+      /(\[TOOL RESULT\][^\n]*\n)([\s\S]{2000,}?)(\n\n---)/g,
+      (match, header, body, tail) => {
+        if (body.length > 2000) {
+          return header + body.slice(0, 1000) + "\n...[file content truncated]...\n" + body.slice(-200) + tail;
+        }
+        return match;
+      }
+    );
+  }
+
+  return compacted;
 }

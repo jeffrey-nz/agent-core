@@ -1,3 +1,4 @@
+import path from "node:path";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
 import { eventBus } from "#web/eventBus.js";
@@ -201,6 +202,48 @@ export async function buildJsonToolsFollowUp({
       result: resultStr,
     });
     toolCalls.push(tc);
+
+    // Quick TypeScript syntax check after writing .ts/.tsx files.
+    // Advisory only — never blocks the write. Skipped silently if tsc is unavailable.
+    if (
+      toolName === "write_file" &&
+      !isError &&
+      toolContext?.rootDir &&
+      /\.(ts|tsx)$/.test(toolParams?.path || "")
+    ) {
+      try {
+        const fs = await import("node:fs/promises");
+        const tscBin = path.join(toolContext.rootDir, "node_modules", ".bin", "tsc");
+        const nodeModulesReady = await fs.access(tscBin).then(() => true).catch(() => false);
+
+        if (nodeModulesReady) {
+          const { execAsync } = await import("#utils/exec.js");
+          const filePath = toolParams.path;
+          const relPath = filePath.startsWith(toolContext.rootDir + "/") || filePath.startsWith(toolContext.rootDir + "\\")
+            ? filePath.slice(toolContext.rootDir.length + 1)
+            : filePath;
+
+          const tsResult = await execAsync(
+            `npx tsc --noEmit --allowJs --skipLibCheck --jsx react --target ES2020 --moduleResolution node "${relPath}" 2>&1 || true`,
+            { cwd: toolContext.rootDir },
+          ).catch(() => null);
+
+          // Only report TS1xxx errors (syntax/parse errors) — TS2xxx are type errors
+          // that are expected on single-file checks without full project context.
+          if (tsResult?.stdout?.match(/error TS1\d{3}\b/)) {
+            const errorText = tsResult.stdout.slice(0, 2000);
+            log(colors.yellow(`  [TypeScript] Errors detected in ${relPath} — injecting feedback to AI.`));
+            results.push({
+              tool: "typescript_check",
+              parameters: { path: relPath },
+              result: `TypeScript errors in ${relPath}:\n${errorText}\nPlease fix these errors before continuing.`,
+            });
+          }
+        }
+      } catch {
+        // Non-fatal — TypeScript check failures are silently ignored.
+      }
+    }
   }
 
   return formatToolResults(results);

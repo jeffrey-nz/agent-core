@@ -96,6 +96,7 @@ Suggest the order in which files should be modified to avoid dependency issues.
 Hard constraints, migration notes, or tricky edge cases the implementor must know.
 
 RULES:
+- EFFICIENCY: Call multiple read_file, grep, and list_dir tools in a single response array. Group related reads together — you can read 5-10 files at once by including them all in one JSON array. Never wait for a file result before deciding to read another file you already know you need.
 - Use tools aggressively - you have ${MAX_STEPS_SCOPER} steps, use them
 - Read the actual file contents before making any claim about line numbers
 - MANDATORY PATH VERIFICATION: For EVERY file path mentioned in the research report, call read_file or find_file to confirm it exists BEFORE including it in your scope document. This is not optional.

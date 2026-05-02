@@ -144,6 +144,18 @@ function classifyByKeywords(taskText) {
     (
       /\b(change|rename|update)\b.{0,40}\b(from|to)\b.{0,40}\b["'`]/i.test(taskText) &&
       !hasWideScope
+    ) ||
+    (
+      /\b(fix|repair|correct|resolve)\b.{0,80}\b(typescript|ts)\b.{0,80}\b(error|compilation|type|syntax)/i.test(taskText) &&
+      !hasWideScope
+    ) ||
+    (
+      /\b(syntax|corruption|corrupt)\b.{0,60}\b(error|issue|fix)\b/i.test(taskText) &&
+      !hasWideScope
+    ) ||
+    (
+      /\bnpm run build\b.{0,60}\b(fail|error|fix)/i.test(taskText) &&
+      !hasWideScope
     )
   ) {
     return { taskType: "quick_edit", rationale: "Keyword match: targeted fix of a specific named error or value" };

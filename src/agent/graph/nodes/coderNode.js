@@ -717,24 +717,34 @@ ${buildAcceptanceTestDirective(state.projectType)}
 - FILE OPERATION REQUIREMENT: If this subtask requires code changes (implementation, fix, refactor, etc.), you MUST produce at least one write_file or patch_file tool call. If you genuinely cannot make any change (e.g., the code is already correct), you MUST output a JSON field at the end of your response: \"NO_CHANGES_NEEDED\": true. Do NOT output this flag if you wrote any files.
 - After executing, summarize your changes so the verifier can assess them.`;
 
-  // Tail window size: reduce aggressively on high retry counts to prevent
-  // context bloat from repeated error messages pushing the model into
-  // explanation/prose mode instead of JSON tool-call mode.
-  const TAIL_SIZE = retryCount >= 3 ? 8 : retryCount >= 2 ? 12 : 20;
-  const allMessages = state.messages;
+  // Phase-isolated context: on the first turn of each subtask, strip all the
+  // accumulated researcher/scoper/PM messages — the system prompt already injects
+  // research, scope, intent, and the current subtask.  Only the original user
+  // request is kept so the coder starts with a clean context window (~10KB vs
+  // 80-100KB), cutting first-turn latency from 30-60 s to 8-15 s.
+  // On retries we keep a recent tail so the coder sees its own prior exchange.
   let windowedMessages;
-  if (allMessages.length <= TAIL_SIZE + 1) {
-    windowedMessages = allMessages;
+  if (retryCount === 0 && !isStallRetry) {
+    // Fresh subtask start — only the original user task message.
+    windowedMessages = [state.messages[0]].filter(Boolean);
   } else {
-    const omitted = allMessages.length - 1 - TAIL_SIZE;
-    windowedMessages = [
-      allMessages[0],
-      {
-        role: "user",
-        content: `[${omitted} earlier message(s) omitted to save context window. Use read_file if you need file contents again.]`,
-      },
-      ...allMessages.slice(-TAIL_SIZE),
-    ];
+    // Retry — use a shrinking tail of recent messages so the coder sees what
+    // went wrong without inheriting the full pipeline history.
+    const TAIL_SIZE = retryCount >= 3 ? 6 : retryCount >= 2 ? 10 : 16;
+    const allMessages = state.messages;
+    if (allMessages.length <= TAIL_SIZE + 1) {
+      windowedMessages = allMessages;
+    } else {
+      const omitted = allMessages.length - 1 - TAIL_SIZE;
+      windowedMessages = [
+        allMessages[0],
+        {
+          role: "user",
+          content: `[${omitted} earlier message(s) omitted to save context window. Use read_file if you need file contents again.]`,
+        },
+        ...allMessages.slice(-TAIL_SIZE),
+      ];
+    }
   }
 
   // Raised truncation limit - C# files regularly exceed 4000 chars.
@@ -803,6 +813,24 @@ ${buildAcceptanceTestDirective(state.projectType)}
       dashboardState.aiStatus = label;
       eventBus.emit("spinner_update", { status: label });
     }, 10000);
+
+    // On repeated stalls (retryCount >= 2), force a fresh browser session so the
+    // accumulated chat history (which may be triggering the stall) is cleared.
+    // startNewChat() closes the current browser tab; the next sendTurn opens a new one.
+    if (isStallRetry && retryCount >= 2 && state.provider?.startNewChat) {
+      log(colors.yellow(
+        `  [Graph] -> Stall detected (retry ${retryCount}) — restarting browser session with fresh context`,
+      ));
+      eventBus.emit("system_message", {
+        text: `⚠️ Stall on retry ${retryCount} — restarting browser session`,
+        type: "warning",
+      });
+      try {
+        await state.provider.startNewChat();
+      } catch (restartErr) {
+        log(colors.dim(`  [Graph] -> Session restart failed (${restartErr.message}) — continuing with existing session`));
+      }
+    }
 
     let result;
     try {
