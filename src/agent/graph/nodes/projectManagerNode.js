@@ -263,6 +263,8 @@ CSS FILE CONSOLIDATION (CRITICAL for React/Vue/Vite projects — prevents styles
 BYTE-SIZED SUBTASK RULES (CRITICAL — enforced by the pipeline):
 - Each implementation subtask MUST touch at most 3 files. If a change requires more, split it into multiple subtasks.
 - Prefer 6–12 subtasks for a medium feature. More subtasks = better visibility, easier resume, less hallucination.
+- For new_project tasks: maximum 7 subtasks total (consolidate related work into fewer, larger subtasks). Grouping related concerns — e.g. all game logic in one subtask, all UI components in one subtask — is preferred over creating a separate subtask for each file.
+- Each subtask should be completable in one AI response. If a subtask would require writing more than 5 files, either split it into two focused subtasks or merge it with a closely related subtask so the combined scope stays under 5 files.
 - NEVER write subtasks like "Implement the entire X module", "Refactor all Y files", or "Update everything in Z". These always exceed 3 files and stall the session.
 - Each subtask description must fit in one sentence (≤ 20 words). If you need more words, split the subtask.
 - A subtask that touches a model file and its view file is fine (2 files). Adding the controller too is the maximum (3 files). Adding tests is a fourth subtask.
@@ -388,6 +390,7 @@ NEW_PROJECT MODE — You are building a brand-new application from scratch. Ther
 - First subtask must install dependencies (npm install) AND create tsconfig.json, vite.config.ts, index.html, package.json WITH all required deps (including eslint-plugin-react-hooks for React projects). Verify npm run build succeeds.
 - Last subtask should be a full integration: wire all components together and verify the app runs (npm run dev starts without errors, npm run build exits 0).
 - implementation_note must describe WHAT TO CREATE, not what to modify.
+- For new project tasks, prefer fewer larger subtasks over many small ones. A subtask implementing an entire game hook (200-400 lines) is better than 3 subtasks each touching the same file.
 
 REACT GAME PROJECT SUBTASK RULES:
 - The scaffold subtask MUST include eslint-plugin-react-hooks in devDependencies and configure it in eslint.config.js

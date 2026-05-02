@@ -191,9 +191,32 @@ const nextSubtaskNode = async (state) => {
       const status = await execAsync("git status --porcelain", { cwd: state.projectDir });
       if (status.stdout.trim()) {
         const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task?.slice(0, 60) || "force-advanced subtask";
+
+        // Before committing, run a quick TypeScript check so downstream subtasks
+        // know if they're inheriting broken code. If tsc fails, prefix the commit
+        // message with [BROKEN] so it's visible in git log, and the pre-flight
+        // check in verifierNode will catch it at the start of the next subtask.
+        let brokenFlag = "";
+        try {
+          const import_fs = await import("node:fs/promises");
+          const import_path = await import("node:path");
+          const tscBin = import_path.default.join(state.projectDir, "node_modules", ".bin", "tsc");
+          const hasTsc = await import_fs.default.access(tscBin).then(() => true).catch(() => false);
+          if (hasTsc) {
+            const tsconfigApp = import_path.default.join(state.projectDir, "tsconfig.app.json");
+            const hasTsconfigApp = await import_fs.default.access(tsconfigApp).then(() => true).catch(() => false);
+            const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
+            const tscRes = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: state.projectDir });
+            if (tscRes.status !== 0) {
+              brokenFlag = "[BROKEN] ";
+              log(colors.red(`  [Pipeline] Force-advance: TypeScript errors detected — committing as ${brokenFlag}${taskLabel}`));
+            }
+          }
+        } catch { /* non-fatal TS check */ }
+
         await execAsync("git add -A", { cwd: state.projectDir });
         await execAsync(
-          `git commit -m "force-advance: ${taskLabel.replace(/["`$\\]/g, "'")} (max retries exceeded)"`,
+          `git commit -m "${brokenFlag}force-advance: ${taskLabel.replace(/["`$\\]/g, "'")} (max retries exceeded)"`,
           { cwd: state.projectDir },
         );
         log(colors.yellow(`  [Pipeline] Force-advanced uncommitted files committed: ${taskLabel}`));

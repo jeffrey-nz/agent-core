@@ -401,13 +401,36 @@ export async function coderNode(state, config) {
       }
     }
 
+    // Chess / game hook architecture guidance: prevent the legalMoves={[]} antipattern.
+    const isChessTask = /chess|board.*game|game.*board/i.test(state.messages.find(m => m.role === "user")?.content || "");
+    const gameHookGuidance = isChessTask
+      ? `\n⚡ CHESS GAME HOOK ARCHITECTURE — MANDATORY PATTERN:\n` +
+        `The useChessGame hook MUST manage selectedSquare and legalMoves INTERNALLY:\n` +
+        `  const [selectedSquare, setSelectedSquare] = useState<Position | null>(null);\n` +
+        `  const [legalMoves, setLegalMoves] = useState<Position[]>([]);\n` +
+        `  function handleSquareClick(position: Position) {\n` +
+        `    if (selectedSquare === null) {\n` +
+        `      const piece = board[position.row][position.col];\n` +
+        `      if (piece?.color === currentTurn) {\n` +
+        `        setSelectedSquare(position);\n` +
+        `        setLegalMoves(getLegalMoves(board, position, currentTurn, enPassantTarget, castlingRights));\n` +
+        `      }\n` +
+        `    } else { /* execute move */ }\n` +
+        `  }\n` +
+        `The hook returns: { board, currentTurn, selectedSquare, legalMoves, handleSquareClick,\n` +
+        `  isCheck, isCheckmate, isStalemate, gameOver, moveHistory, capturedPieces,\n` +
+        `  resetGame, promotionPending, handlePromotion }\n` +
+        `App.tsx passes legalMoves={legalMoves} to ChessBoard (NEVER legalMoves={[]}!).\n` +
+        `App.tsx passes onSquareClick={handleSquareClick} to ChessBoard.\n`
+      : "";
+
     newProjectSection =
       `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
       `- Every file in this subtask must be CREATED with write_file — there is no existing code to patch.\n` +
       `- If a file already exists (e.g. App.tsx with Vite defaults), REPLACE it entirely with write_file.\n` +
       `- Do NOT output prose descriptions of what you would write — use actual write_file tool calls.\n` +
       `- After creating files, run npm run build (or equivalent) to verify there are no compile errors.\n` +
-      firstWriteHint + injectedConfigs;
+      gameHookGuidance + firstWriteHint + injectedConfigs;
   }
 
   const coderDirective = buildCoderDirective(state.projectType);

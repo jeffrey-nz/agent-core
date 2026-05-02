@@ -438,6 +438,43 @@ async function _verifierImpl(state) {
     }
   }
 
+  // Pre-flight TypeScript check: if there are TypeScript errors BEFORE the coder
+  // even starts (carried over from a force-advanced broken subtask), inject a
+  // fix directive immediately so the coder fixes them first.
+  if (state.projectDir && (state.currentSubtaskIndex ?? 0) >= 1 && (state.coderRetryCount ?? 0) === 0) {
+    const tsFiles = await fs.promises.readdir(path.join(state.projectDir, "src"))
+      .then(files => files.filter(f => /\.(ts|tsx)$/.test(f)))
+      .catch(() => []);
+
+    if (tsFiles.length > 0) {
+      const nodeModulesReady = await fs.promises.access(path.join(state.projectDir, "node_modules", ".bin", "tsc")).then(() => true).catch(() => false);
+      if (nodeModulesReady) {
+        const tsconfigApp = path.join(state.projectDir, "tsconfig.app.json");
+        const tsconfigRoot = path.join(state.projectDir, "tsconfig.json");
+        const hasTsconfigApp = await fs.promises.access(tsconfigApp).then(() => true).catch(() => false);
+        const hasTsconfigRoot = await fs.promises.access(tsconfigRoot).then(() => true).catch(() => false);
+
+        if (hasTsconfigApp || hasTsconfigRoot) {
+          const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
+          const preflightRes = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: state.projectDir });
+          if (preflightRes.status !== 0) {
+            const errOut = (preflightRes.stdout || preflightRes.stderr || "").slice(0, 2000);
+            const newRetryCount = 1; // Start retry count at 1 so coder knows this isn't fresh
+            log(colors.red(`  [Graph] -> Verifier: pre-flight TypeScript check FAILED — existing errors before this subtask:\n${errOut.slice(0, 200)}`));
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER PRE-FLIGHT CHECK]\n\nThe project has TypeScript compilation errors BEFORE you start on the current subtask. These are leftover from a previous subtask that did not complete correctly.\n\nFix ALL of the following TypeScript errors first, then also implement the current subtask:\n\n\`\`\`\n${errOut}\n\`\`\`\n\nOnce you fix these errors, npm run build must pass with zero TypeScript errors.`,
+              }],
+            };
+          }
+        }
+      }
+    }
+  }
+
   // If the coder turn itself failed (e.g. SESSION_BUSY, TURN_SKIPPED), the
   // modifiedFiles list is stale (accumulated from prior subtasks). Always fail
   // here rather than letting stale files produce a false PASS.
@@ -1853,7 +1890,7 @@ DEBUGGING STRATEGY:
           try {
             await execAsync("npm install --prefer-offline", {
               cwd: state.projectDir,
-              timeout: 180000,
+              timeout: 300000,
             });
             log(colors.green("  [Setup] npm install completed"));
           } catch (err) {

@@ -48,6 +48,12 @@ CRITICAL — AI OPPONENT ACCEPTANCE CRITERIA (add these as verifiable success_cr
 - "AI opponent uses useRef (not useState) for the 'AI is thinking' semaphore to avoid React useEffect timer cancellation"
 - "No infinite re-render loops: the game state stabilizes after each move"
 
+CRITICAL — HOOK ARCHITECTURE (add these as key_constraints):
+- "The useChessGame hook must manage selectedSquare and legalMoves INTERNALLY — it returns them as state values. App.tsx must NOT manage its own selectedSquare state or pass legalMoves={[]}."
+- "useChessGame returns: { board, currentTurn, selectedSquare, legalMoves, handleSquareClick, isCheck, isCheckmate, isStalemate, gameOver, moveHistory, capturedPieces, resetGame, promotionPending, handlePromotion }"
+- "handleSquareClick(position) in the hook handles BOTH selection and move execution. It computes legal moves for the selected piece and stores them in the hook's state."
+- "No file should exceed 200 lines. Split complex logic into separate utility files (moveValidation.ts, legalMoves.ts) that the hook imports."
+
 VISUAL QUALITY RULE for all interactive/game projects: game entities (pieces, cards, tiles, etc.) must be rendered using recognizable visual elements (Unicode symbols, SVG images, proper icons), not bare letter/number codes.
 
 Output a JSON object with exactly these fields:

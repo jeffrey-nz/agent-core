@@ -133,9 +133,11 @@ function classifyByKeywords(taskText) {
   }
 
   // Quick edit: fix a specific named error/bug/value in one place.
-  // Require no scope-expanding language ("all", "throughout", etc.) that implies many files.
-  // Also exclude tasks that ask to FIND/LOOK FOR issues — those require full research, not a quick patch.
-  const hasWideScope = /\b(all|every|throughout|across|entire|whole|multiple|various|several|general|codebase|find|look for|search for|identify|discover|audit)\b/i.test(taskText);
+  // Require no scope-expanding language that implies many files.
+  // "all" alone is not wide-scope — "all files/components/functions" is. Require it
+  // to appear with a noun that implies multiple targets.
+  const hasWideScope = /\b(throughout|across|entire|whole|general|codebase|find all|fix all|search for|identify all|discover|audit)\b/i.test(taskText) ||
+    /\b(all|every|multiple|various|several)\b.{0,30}\b(file|component|function|class|method|module|endpoint|page|route)\b/i.test(taskText);
   if (
     (
       /\b(fix|repair|correct|resolve)\b.{0,60}\b(error|bug|issue|crash|exception|500|404|broken)\b/i.test(taskText) &&
