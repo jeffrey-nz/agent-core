@@ -1152,7 +1152,11 @@ ${buildAcceptanceTestDirective(state.projectType)}
         /^<\?php\b/m.test(fullText) ||         // PHP open tag
         /^<%-?\s*(if|loop|with)\b/m.test(fullText) || // SS template tag
         /^[.#]?[\w-]+\s*\{[\s\S]*?[\w-]+\s*:/m.test(fullText) || // CSS rule block
-        /^\s+[\w-]+\s*:\s+[^;{]+;/m.test(fullText); // CSS property declaration
+        /^\s+[\w-]+\s*:\s+[^;{]+;/m.test(fullText) || // CSS property declaration
+        /^\s*(func|extends|var|const|enum|class|onready|export)\s/m.test(fullText) || // GDScript
+        /^\s*"[\w_]+"\s*:\s*\{/m.test(fullText) || // JSON key: { — JSON object values
+        /^\[\s*\{/m.test(fullText) ||          // JSON array of objects
+        /^\s*\{\s*\n\s*"[\w_]+":/m.test(fullText); // JSON object with string keys
 
       if (looksLikeFileContent) {
         log(colors.yellow(
