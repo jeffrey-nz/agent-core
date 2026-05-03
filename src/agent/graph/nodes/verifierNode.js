@@ -2244,6 +2244,37 @@ ${currentTask}${capWarning}`,
       log(colors.green("  [Graph] -> Verifier: GDScript syntax check passed."));
     }
 
+    // Stall check: if the subtask required specific files but the coder wrote nothing, fail.
+    // This prevents silent stall-pass where the browser session times out and the LLM
+    // returns no tool calls, yet the subtask is marked complete.
+    const requiredFiles = state.subtasks?.[state.currentSubtaskIndex]?.files || [];
+    const didWriteFiles = (state.modifiedFiles || []).length > 0;
+    if (requiredFiles.length > 0 && !didWriteFiles) {
+      const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+      const atCap = newRetryCount >= effectiveMaxRetries;
+      if (!atCap) {
+        log(colors.red(`  [Graph] -> Verifier: Godot coder wrote NO files but subtask requires: ${requiredFiles.slice(0, 3).join(", ")} — retry ${newRetryCount}/${effectiveMaxRetries}.`));
+        eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: coder produced no file changes`, type: "warning" });
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetryCount,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER AUTOMATED FEEDBACK — NO FILES WRITTEN]
+
+You did not write any files in your last response. The subtask requires modifications to:
+${requiredFiles.map((f) => `  - ${f}`).join("\n")}
+
+You MUST use write_file to modify these files. Do not just read them and respond with text — write the actual changes.
+
+CURRENT SUBTASK:
+${currentTask}`,
+          }],
+        };
+      }
+      log(colors.yellow("  [Graph] -> Verifier: Godot coder wrote no files but at retry cap — force-passing."));
+    }
+
     // Godot projects don't use TypeScript or npm — skip those gates and PASS.
     emitTaskCompleted(state);
     const godotTaskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "Godot subtask";
