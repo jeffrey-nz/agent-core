@@ -22,9 +22,10 @@
  * Returns the project-type constraint block for all AI nodes.
  * Accepts the flags object produced by detectProjectContext().
  */
-export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe }) {
+export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot }) {
   if (unity)          return UNITY_CONSTRAINTS;
   if (isSwift)        return SWIFT_CONSTRAINTS;
+  if (isGodot)        return GODOT_CONSTRAINTS;
   if (isSilverStripe) return SILVERSTRIPE_CONSTRAINTS;
   if (isCSharp)       return CSHARP_CONSTRAINTS;
   if (isPhp)          return PHP_CONSTRAINTS;
@@ -43,6 +44,47 @@ CRITICAL UNITY CONSTRAINTS — MUST FOLLOW:
 - MonoBehaviour subclasses MUST be in a file whose name matches the class name exactly (e.g. PlayerController.cs for class PlayerController).
 - Namespaces in C# scripts should match the folder structure under Assets/ to avoid assembly conflicts.
 - Assembly Definition (.asmdef) files control which scripts belong to which assembly. If a new script should belong to an existing assembly, place it in the correct folder — do not modify .asmdef files unless specifically required.`;
+
+const GODOT_CONSTRAINTS = `[PROJECT TYPE: Godot 4 / GDScript]
+CRITICAL GODOT CONSTRAINTS — MUST FOLLOW:
+
+SYNTAX VERIFICATION (MANDATORY after every .gd file write):
+- After writing or patching any .gd file, verify with:
+  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1')
+  GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  WIN_PATH = project path in Windows format (e.g. C:/Users/Work/card_game — NOT the /mnt/c/ WSL form)
+  Exit code 0 with no "SCRIPT ERROR" lines = syntax clean. Any error = fix before proceeding.
+
+GDSCRIPT 4 SYNTAX RULES (violations cause SCRIPT ERROR at --check-only time):
+- All .gd files MUST start with: extends <NodeType>  (e.g. extends Node, extends Control)
+- Variable declarations: "var name: Type = value" — NOT bare "name: Type = value"
+- Type hints: int, float, bool, String, Array[String], Dictionary, Vector2, Color
+- Signal connections: signal_name.connect(callable) — NOT connect("signal_name", handler) (Godot 3 syntax)
+- Autoloads accessed by registered name: GameState.player_hp — NOT $GameState or get_node(...)
+- Dict access: dict.get("key", default) — NOT dict["key"] (crashes on missing key)
+- String formatting: "text %s" % value or "text %d %d" % [a, b] — NOT Python f-strings
+- super call: super.method_name() — NOT parent.method_name()
+- Callable/lambda: func(x): return x*2 or method.bind(arg) for partial application
+- Array size: array.size() — NOT len(array)
+- Type test: value is TypeName — NOT isinstance(value, TypeName)
+
+PATTERNS TO AVOID:
+- No Python dict/list comprehensions (not supported)
+- No := walrus operator
+- No __init__() — use _init() or _ready()
+- No Python-style *args or **kwargs
+
+PROJECT STRUCTURE:
+- Scripts: scripts/*.gd — each MUST have "extends" matching the scene node type
+- Data: data/*.json — load with JSON.parse_string(FileAccess.get_file_as_string("res://data/file.json"))
+- Scenes: scenes/*.tscn — NEVER edit .tscn files directly (managed by Godot editor)
+- Tests: tests/TestRunner.gd (unit tests) and tests/Playthrough.gd (integration)
+- Autoloads (global singletons): GameState, CardDB, Palette, SettingsManager, SaveManager
+
+TESTING:
+- Unit tests: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Test.tscn 2>&1') — exits 0 = pass
+- Playthrough: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Playthrough.tscn 2>&1') — exits 0 = pass
+- When adding new features, add _assert() calls to tests/TestRunner.gd`;
 
 const CSHARP_CONSTRAINTS = `[PROJECT TYPE: C# / .NET]
 - Build: dotnet build <solution-or-project> --no-restore
@@ -159,6 +201,7 @@ export function buildResearchDirective(projectType) {
   if (projectType === "unity")        return UNITY_RESEARCH_DIRECTIVE;
   if (projectType === "silverstripe") return SILVERSTRIPE_RESEARCH_DIRECTIVE;
   if (projectType === "swift")        return SWIFT_RESEARCH_DIRECTIVE;
+  if (projectType === "godot")        return GODOT_RESEARCH_DIRECTIVE;
   return "";
 }
 
@@ -394,6 +437,26 @@ SWIFT PROJECT DETECTED. During your research you MUST specifically investigate:
 
 DO NOT attempt to run xcodebuild or swift build — the pipeline cannot sign or resolve the full Xcode build graph.`;
 
+const GODOT_RESEARCH_DIRECTIVE = `
+
+GODOT PROJECT DETECTED. During your research you MUST specifically investigate:
+1. Read project.godot to identify the Godot version and which autoloads are registered.
+2. Read ALL scripts in scripts/ — especially autoloads (GameState.gd, CardDB.gd, etc.) to understand the data model and existing API.
+3. For tasks adding cards/enemies/relics/events: read the corresponding data/*.json file to understand the schema before writing new entries.
+4. Run the baseline syntax check to confirm the project is clean before any changes:
+   GODOT_BIN=/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+   execute_bash('"${GODOT_BIN}" --headless --path "C:/Users/Work/card_game" --check-only --quit 2>&1')
+   Include the full output in KEY FINDINGS SUMMARY. If errors exist, note them.
+5. Run the baseline unit tests:
+   execute_bash('"${GODOT_BIN}" --headless --path "C:/Users/Work/card_game" tests/Test.tscn 2>&1')
+   Include full output in KEY FINDINGS SUMMARY (pass/fail count).
+6. Identify which scripts and data files need modification for the task.
+7. Check tests/TestRunner.gd to understand existing test coverage and how to add new tests.
+
+ALREADY-IMPLEMENTED CHECK (prevents duplicate work):
+- Before generating subtasks to add cards/enemies/relics/events, always check the data JSON files first.
+- If any requested feature already exists: include in KEY FINDINGS SUMMARY: "⚠️ ALREADY PRESENT: [feature] in [file]. Only add what is genuinely missing."`;
+
 // ---------------------------------------------------------------------------
 // TDD directive — injected into planner and project manager system prompts
 // ---------------------------------------------------------------------------
@@ -405,6 +468,7 @@ DO NOT attempt to run xcodebuild or swift build — the pipeline cannot sign or 
 export function buildTddDirective(projectType) {
   if (projectType === "unity") return UNITY_TDD_DIRECTIVE;
   if (projectType === "swift") return SWIFT_TDD_DIRECTIVE;
+  if (projectType === "godot") return GODOT_TDD_DIRECTIVE;
   if (projectType === "node" || projectType === "unknown") return NODE_TDD_DIRECTIVE;
   return GENERIC_TDD_DIRECTIVE;
 }
@@ -418,6 +482,8 @@ ANTI-STUB RULE (CRITICAL): When the task requires implementing logic (getLegalMo
 const GENERIC_TDD_DIRECTIVE = `Only add test subtasks if the task explicitly requires them. Do not force TDD for non-JS/TS projects.`;
 
 const SWIFT_TDD_DIRECTIVE = `IMPORTANT: This is a Swift project. Do NOT mandate writing XCTest unit test files first and do NOT create subtasks whose primary output is a test file. Swift tests require the Xcode test runner (xcodebuild test) which cannot be run in this pipeline. Only include test subtasks if the original user task explicitly requests unit or UI tests.`;
+
+const GODOT_TDD_DIRECTIVE = `This is a Godot 4 / GDScript project. Tests run headlessly via execute_bash. After implementing each new feature (cards, enemies, relics, events, mechanics), add corresponding _assert() test cases to tests/TestRunner.gd. Use the existing _assert(label, condition) helper pattern already in that file. Do NOT create new test scene files — add test functions to the existing TestRunner.gd and call them from _ready(). The test subtask should run: GODOT_BIN --headless --path WIN_PATH tests/Test.tscn 2>&1 and confirm exit 0 with the new tests passing.`;
 
 // ---------------------------------------------------------------------------
 // Coder directive — injected into the coder system prompt
@@ -441,7 +507,8 @@ export function buildCoderDirective(projectType) {
   const frameworkDirective =
     projectType === "silverstripe" ? SILVERSTRIPE_CODER_DIRECTIVE :
     projectType === "unity"        ? UNITY_CODER_DIRECTIVE :
-    projectType === "swift"        ? SWIFT_CODER_DIRECTIVE : "";
+    projectType === "swift"        ? SWIFT_CODER_DIRECTIVE :
+    projectType === "godot"        ? GODOT_CODER_DIRECTIVE : "";
   return GENERAL_CODER_DIRECTIVE + frameworkDirective;
 }
 
@@ -555,6 +622,31 @@ const UNITY_CODER_DIRECTIVE = `
 - UNITY BUILD: Do NOT run dotnet build or dotnet test. Unity compiles scripts inside the Editor. Verify C# syntax by reading the file after writing — do not attempt to compile from the CLI.
 - UNITY ASSETS: UXML and USS files do not need compilation. Write them directly and confirm the file content is valid XML/CSS syntax.`;
 
+const GODOT_CODER_DIRECTIVE = `
+- GODOT SYNTAX CHECK (CRITICAL — run after EVERY .gd file write):
+  GODOT_BIN=/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  WIN_PATH = project dir in Windows format (e.g. C:/Users/Work/card_game, not /mnt/c/... WSL form)
+  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1')
+  Exit 0 + no "SCRIPT ERROR" lines = clean. Fix any error before proceeding.
+
+- DATA FILE FORMAT: JSON files in data/ have specific schemas. ALWAYS read the existing data file before adding new entries — use the exact same field names, nesting, and value types as existing entries. NEVER guess the schema.
+
+- AUTOLOAD ACCESS: Access autoloads by their registered name: GameState.player_hp, CardDB.get_card("strike"). Do NOT use get_node("/root/GameState") or $GameState path syntax.
+
+- SIGNAL CONNECTIONS (Godot 4 ONLY):
+  CORRECT: button.pressed.connect(_on_button_pressed)
+  CORRECT: button.pressed.connect(func(): _handle(arg))
+  WRONG: button.connect("pressed", self, "_on_button_pressed")  ← Godot 3 syntax, DOES NOT WORK in Godot 4
+
+- SCENE REFERENCES: NEVER write to .tscn files — they are managed by the Godot editor. Only modify .gd scripts and data/*.json files.
+
+- PROGRAMMATIC UI (this project builds all UI in code — no UXML/prefabs):
+  Create nodes: var lbl = Label.new(); lbl.text = "Hello"; parent.add_child(lbl)
+  Sizing: node.custom_minimum_size = Vector2(width, height)
+  Theming: node.add_theme_color_override("font_color", Color(1, 0, 0))
+
+- TESTS: After implementing a feature, add test assertions to tests/TestRunner.gd using _assert(label, condition). Run the test suite to verify all tests pass before reporting subtask complete.`;
+
 const SWIFT_CODER_DIRECTIVE = `
 - SWIFT BUILD: Do NOT run xcodebuild or swift build. The pipeline cannot resolve signing identities or the full Xcode build graph.
 - SWIFT TYPE CHECKING: After writing or patching any .swift file, verify your changes with: execute_bash("swiftc -typecheck -sdk \\"$(xcrun --show-sdk-path)\\" $(find . -name '*.swift' -not -path '*/Pods/*' -not -path '*/.build/*' -not -path '*Tests*') 2>&1"). This catches API errors (wrong modifier on wrong type, missing imports, etc.) that -parse silently misses. Treat any non-module-not-found error as a blocker and fix it. IMPORTANT: if the ONLY remaining errors are "no such module 'UIKit'", do NOT declare clean — UIKit is an iOS-only framework not present in the macOS command-line SDK. UIKit cascade errors MASK other real type errors; fix the UIKit dependency first, then re-run typecheck to reveal hidden errors.
@@ -627,11 +719,23 @@ const SWIFT_CODER_DIRECTIVE = `
 export function buildAcceptanceTestDirective(projectType) {
   if (projectType === "swift")  return SWIFT_ACCEPTANCE_TEST_DIRECTIVE;
   if (projectType === "unity")  return UNITY_ACCEPTANCE_TEST_DIRECTIVE;
+  if (projectType === "godot")  return GODOT_ACCEPTANCE_TEST_DIRECTIVE;
   return WEB_ACCEPTANCE_TEST_DIRECTIVE;
 }
 
 const WEB_ACCEPTANCE_TEST_DIRECTIVE =
   `- ACCEPTANCE TEST SUBTASKS: For tasks beginning with "ACCEPTANCE TEST:" - do NOT write any files. Use http_request to fetch the URL given in the implementation_note. Search the response HTML for the SUCCESS evidence described in acceptanceCriteria. If found: quote the HTML snippet and report "ACCEPTANCE TEST PASSED — [feature] confirmed: [snippet]". If NOT found: report what IS in the response, diagnose which component is likely missing, and if you can identify a fixable gap (e.g. missing template, missing $ElementalArea, dual-rendering bug) make the fix with write_file/patch_file, re-run db:build if needed, then re-curl. Only report "ACCEPTANCE TEST FAILED" if you cannot identify and fix the gap. CRITICAL RULES: (1) HTTP 200 alone is NOT acceptance — you MUST find the feature-specific HTML in the body. (2) For SilverStripe Elemental: search the response HTML for BOTH the Elemental markup (class="elemental-area" or data-block-type) AND check that the old \`$Content\` block is NOT also rendering unconditionally alongside it. If you see plain-text content output AND elemental-area in the same page, the template has a dual-rendering bug — fix it with patch_file before declaring PASSED. (3) Quote the specific HTML snippet that proves the feature is live — do not just state the HTTP status code.`;
+
+const GODOT_ACCEPTANCE_TEST_DIRECTIVE =
+  `- ACCEPTANCE TEST SUBTASKS: For tasks beginning with "ACCEPTANCE TEST:" - do NOT write any files and do NOT use http_request (Godot is a game engine with no HTTP server). Instead, use execute_bash to run the Godot headless test suite:
+  GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  WIN_PATH = project directory in Windows format (e.g. C:/Users/Work/card_game)
+  1. Syntax check: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1') — exit 0, no SCRIPT ERROR
+  2. Unit tests:   execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Test.tscn 2>&1') — exit 0, all pass
+  3. Playthrough:  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Playthrough.tscn 2>&1') — exit 0, all pass
+  Report: "ACCEPTANCE TEST PASSED — syntax clean, N unit tests passed, M playthrough tests passed"
+  If any test fails: read the error output to identify the failing GDScript, fix with write_file/patch_file, re-run.
+  CRITICAL: (1) Never use http_request — there is no web server. (2) Quote the test output showing pass/fail counts as evidence. (3) Test count must be >= the count before this task started (adding features MUST add tests).`;
 
 const UNITY_ACCEPTANCE_TEST_DIRECTIVE =
   `- ACCEPTANCE TEST SUBTASKS: For tasks beginning with "ACCEPTANCE TEST:" - do NOT write any files and do NOT use http_request (Unity is a game engine with no HTTP server). Instead, use execute_bash to run Unity batchmode tests, then read the results XML:
@@ -657,6 +761,7 @@ export function buildPlannerVerificationDirective(projectType) {
   if (projectType === "silverstripe") return SILVERSTRIPE_PLANNER_VERIFICATION;
   if (projectType === "swift")        return SWIFT_PLANNER_VERIFICATION;
   if (projectType === "unity")        return UNITY_PLANNER_VERIFICATION;
+  if (projectType === "godot")        return GODOT_PLANNER_VERIFICATION;
   return "";
 }
 
@@ -670,6 +775,20 @@ Example:
   task: "ACCEPTANCE TEST: Verify hit effects and camera tracking"
   acceptanceCriteria: "execute_bash Unity batchmode test runner exits 0 AND read_file Logs/editmode_results.xml confirms <test-case name='EffectSpawnTest' result='Passed' /> and <test-case name='CameraTrackingTest' result='Passed' />."
   failureCriteria: "editmode_results.xml shows any test as Failed or missing, or batchmode exits non-zero."`;
+
+const GODOT_PLANNER_VERIFICATION = `
+For Godot projects the LAST subtask MUST be an acceptance test using execute_bash evidence — NOT http_request (Godot is a game engine with no HTTP server):
+- GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+- WIN_PATH = project path in Windows format (e.g. C:/Users/Work/card_game)
+- The acceptanceCriteria MUST say: "execute_bash: '${GODOT_BIN}' --headless --path '${WIN_PATH}' tests/Test.tscn 2>&1 exits 0 AND shows N passed, 0 failed. Also run Playthrough.tscn and confirm 0 failures."
+- The implementationNote MUST include the exact execute_bash commands with GODOT_BIN and WIN_PATH filled in.
+- NEVER write "http_request" or any URL in a Godot acceptance test.
+- The test count in the acceptance result MUST be >= the baseline (features must add test coverage).
+
+Example:
+  task: "ACCEPTANCE TEST: Verify new enemy types pass all unit and playthrough tests"
+  acceptanceCriteria: "execute_bash Godot headless exits 0 AND test output shows 130+ passed, 0 failed."
+  failureCriteria: "test output shows any failure or Godot exits non-zero."`;
 
 const SILVERSTRIPE_PLANNER_VERIFICATION = `
 For SilverStripe projects the verification subtask MUST include a page render check:

@@ -1395,6 +1395,72 @@ ${currentTask}${capWarning}`,
       }
       // ── end Unity acceptance test bypass ──
 
+      // ── Godot / GDScript acceptance test bypass ──────────────────────────
+      // Godot has no HTTP server — acceptance is execute_bash evidence (headless
+      // test runner for Test.tscn and Playthrough.tscn), NOT http_request.
+      if (state.projectType === "godot") {
+        const response = state.lastCoderResponse || "";
+        const hasPassed = /ACCEPTANCE TEST PASSED/i.test(response);
+        const calledBash = (state.lastToolsExecuted || []).some(
+          (t) => /^execute_bash$/i.test(t),
+        );
+
+        if (hasPassed && calledBash) {
+          log(colors.green("  [Graph] -> Verifier: Godot acceptance test passed (execute_bash evidence confirmed)."));
+          eventBus.emit("system_message", { text: `✓ Godot acceptance test passed: ${currentTask.slice(0, 80)}`, type: "info" });
+          emitTaskCompleted(state);
+          const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+          await commitVerifiedSubtask(state.projectDir, taskLabel);
+          await closeSubIssueForSubtask(state);
+          writeVerificationMarker();
+          return { verifierFeedback: "PASS" };
+        }
+
+        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+        const atCap = newRetryCount >= effectiveMaxRetries;
+        const capWarning = atCap
+          ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): If you do not provide execute_bash evidence in this response, this subtask will be force-skipped.`
+          : "";
+
+        const subtaskMeta = state.subtasks?.[state.currentSubtaskIndex];
+        const criteriaHint = subtaskMeta?.acceptanceCriteria
+          ? `\nSuccess evidence: ${subtaskMeta.acceptanceCriteria}\nFailure indicators: ${subtaskMeta.failureCriteria || "test output shows failures or Godot exits non-zero"}`
+          : "";
+
+        const missingReason = !calledBash
+          ? "You have not called execute_bash yet."
+          : "You called execute_bash but did not report \"ACCEPTANCE TEST PASSED\".";
+
+        log(colors.red(`  [Graph] -> Verifier: Godot acceptance test — ${missingReason} Retry ${newRetryCount}/${effectiveMaxRetries}.`));
+        const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
+        const winPath = state.projectDir?.replace(/^\/mnt\/c\//i, "C:/") || state.projectDir;
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetryCount,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER AUTOMATED FEEDBACK]
+
+GODOT ACCEPTANCE TEST requires execute_bash evidence — NOT http_request (Godot has no HTTP server).
+
+${missingReason}
+
+Required steps:
+1. execute_bash: syntax check: "${godotBin}" --headless --path "${winPath}" --check-only --quit 2>&1
+2. execute_bash: unit tests:   "${godotBin}" --headless --path "${winPath}" tests/Test.tscn 2>&1
+3. execute_bash: playthrough:  "${godotBin}" --headless --path "${winPath}" tests/Playthrough.tscn 2>&1
+4. Report: "ACCEPTANCE TEST PASSED — syntax clean, N unit tests passed, M playthrough tests passed"
+${criteriaHint}
+
+Do NOT use http_request. This is a Godot game — there is no web server.
+
+CURRENT SUBTASK:
+${currentTask}${capWarning}`,
+          }],
+        };
+      }
+      // ── end Godot acceptance test bypass ──
+
       const response = state.lastCoderResponse || "";
       const hasPassed = /ACCEPTANCE TEST PASSED/i.test(response);
       const hasFailed = /ACCEPTANCE TEST FAILED/i.test(response);
@@ -2118,6 +2184,70 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
     const assetTaskLabel =
       state.subtasks?.[state.currentSubtaskIndex]?.task || "Swift asset subtask";
     await commitVerifiedSubtask(state.projectDir, assetTaskLabel);
+    await closeSubIssueForSubtask(state);
+    writeVerificationMarker();
+    return { verifierFeedback: "PASS" };
+  }
+
+  // Godot GDScript syntax gate: for Godot projects, run --check-only after any .gd changes.
+  // Equivalent to the Swift swiftc -typecheck gate. TypeScript/npm-build gates don't apply.
+  if (state.projectType === "godot") {
+    const hasGdFiles = (state.modifiedFiles || []).some((f) => f.endsWith(".gd"));
+    if (hasGdFiles) {
+      const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
+      const winPath = state.projectDir?.replace(/^\/mnt\/c\//i, "C:/") || state.projectDir;
+      log(colors.dim("  [Verifier] Running GDScript syntax check (Godot --check-only)..."));
+
+      const checkRes = await execAsync(
+        `"${godotBin}" --headless --path "${winPath}" --check-only --quit 2>&1`,
+        { cwd: state.projectDir },
+      ).catch((e) => e);
+
+      const checkOut = ((checkRes?.stdout || "") + (checkRes?.stderr || "")).trim();
+      const hasScriptErrors =
+        (checkRes?.status ?? 0) !== 0 || /SCRIPT ERROR|Parse error|ERROR:/i.test(checkOut);
+
+      if (hasScriptErrors) {
+        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+        const atCap = newRetryCount >= effectiveMaxRetries;
+        const capWarning = atCap
+          ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): If you do not fix these GDScript errors in this response, this subtask will be force-skipped.`
+          : "";
+        log(colors.red(`  [Graph] -> Verifier: GDScript syntax check FAILED (retry ${newRetryCount}/${effectiveMaxRetries}).\n${checkOut.slice(0, 200)}`));
+        eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: GDScript syntax error`, type: "warning" });
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetryCount,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER AUTOMATED FEEDBACK — GDSCRIPT SYNTAX ERROR]
+
+Godot --check-only detected script errors. Fix ALL errors before this subtask can pass.
+
+=== GODOT SYNTAX ERRORS ===
+${checkOut.slice(0, 2000)}
+
+Common GDScript 4 mistakes:
+- connect() uses signal.connect(callable) NOT connect("signal_name", handler)
+- Dict access crashes: use dict.get("key", default) NOT dict["key"]
+- var declarations require "var": "var x: int = 0" NOT "x: int = 0"
+- No Python-style comprehensions, no := walrus operator, no len()/isinstance()
+- super.method_name() NOT parent.method_name()
+
+Fix the .gd file(s), then the syntax check will re-run automatically.
+
+CURRENT SUBTASK:
+${currentTask}${capWarning}`,
+          }],
+        };
+      }
+      log(colors.green("  [Graph] -> Verifier: GDScript syntax check passed."));
+    }
+
+    // Godot projects don't use TypeScript or npm — skip those gates and PASS.
+    emitTaskCompleted(state);
+    const godotTaskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "Godot subtask";
+    await commitVerifiedSubtask(state.projectDir, godotTaskLabel);
     await closeSubIssueForSubtask(state);
     writeVerificationMarker();
     return { verifierFeedback: "PASS" };

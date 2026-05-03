@@ -20,6 +20,18 @@ export function isSwiftProject(rootDir) {
 }
 
 /**
+ * Returns true if rootDir appears to be a Godot project.
+ * Detection: project.godot file present in the root.
+ */
+export function isGodotProject(rootDir) {
+  try {
+    return fs.existsSync(path.join(rootDir, "project.godot"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Returns true if rootDir appears to be a Unity project.
  * Detection: Assets/ + ProjectSettings/ directories both present,
  * OR a .sln file alongside an Assets/ directory.
@@ -69,8 +81,9 @@ export function isSilverStripeProject(rootDir) {
  * listing and a few known sentinel files.
  */
 export function detectProjectContext(rootDir) {
-  const unity = isUnityProject(rootDir);
-  const isSwift = !unity && isSwiftProject(rootDir);
+  const isGodot = isGodotProject(rootDir);
+  const unity = !isGodot && isUnityProject(rootDir);
+  const isSwift = !unity && !isGodot && isSwiftProject(rootDir);
 
   let isCSharp = false;
   try {
@@ -91,13 +104,14 @@ export function detectProjectContext(rootDir) {
   let projectType = "unknown";
   if (unity) projectType = "unity";
   else if (isSwift) projectType = "swift";
+  else if (isGodot) projectType = "godot";
   else if (isCSharp) projectType = "csharp";
   else if (isSilverStripe) projectType = "silverstripe";
   else if (isPhp) projectType = "php";
   else if (isNode) projectType = "node";
 
-  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe });
+  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot });
   const researchDirective = buildResearchDirective(projectType);
 
-  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, projectType, constraints, researchDirective };
+  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, projectType, constraints, researchDirective };
 }
