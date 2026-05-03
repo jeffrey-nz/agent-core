@@ -1395,19 +1395,54 @@ ${currentTask}${capWarning}`,
       }
       // ── end Unity acceptance test bypass ──
 
-      // ── Godot / GDScript acceptance test bypass ──────────────────────────
-      // Godot has no HTTP server — acceptance is execute_bash evidence (headless
-      // test runner for Test.tscn and Playthrough.tscn), NOT http_request.
+      // ── Godot / GDScript acceptance test ────────────────────────────────
+      // Godot has no HTTP server — verifier runs the tests directly via execAsync
+      // rather than trusting the coder's response text.
       if (state.projectType === "godot") {
-        const response = state.lastCoderResponse || "";
-        const hasPassed = /ACCEPTANCE TEST PASSED/i.test(response);
-        const calledBash = (state.lastToolsExecuted || []).some(
-          (t) => /^execute_bash$/i.test(t),
-        );
+        const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
+        const winPath = state.projectDir?.replace(/^\/mnt\/c\//i, "C:/") || state.projectDir;
+        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+        const atCap = newRetryCount >= effectiveMaxRetries;
 
-        if (hasPassed && calledBash) {
-          log(colors.green("  [Graph] -> Verifier: Godot acceptance test passed (execute_bash evidence confirmed)."));
-          eventBus.emit("system_message", { text: `✓ Godot acceptance test passed: ${currentTask.slice(0, 80)}`, type: "info" });
+        log(colors.dim("  [Verifier] Running Godot acceptance tests headlessly..."));
+
+        // 1. Syntax check
+        const syntaxRes = await execAsync(
+          `"${godotBin}" --headless --path "${winPath}" --check-only --quit 2>&1`,
+          { cwd: state.projectDir },
+        ).catch((e) => e);
+        const syntaxOut = ((syntaxRes?.stdout || "") + (syntaxRes?.stderr || "")).trim();
+        const hasSyntaxErrors = (syntaxRes?.status ?? 0) !== 0 || /SCRIPT ERROR|Parse error|ERROR:/i.test(syntaxOut);
+        if (hasSyntaxErrors) {
+          log(colors.red(`  [Verifier] Godot syntax errors detected. Retry ${newRetryCount}.`));
+          if (!atCap) {
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{ role: "user", content: `[VERIFIER] Godot syntax check FAILED:\n${syntaxOut.slice(0, 2000)}\n\nFix the GDScript errors, then the acceptance test will re-run.\n\nCURRENT SUBTASK:\n${currentTask}` }],
+            };
+          }
+        }
+
+        // 2. Unit tests (Test.tscn)
+        const unitRes = await execAsync(
+          `"${godotBin}" --headless --path "${winPath}" tests/Test.tscn 2>&1`,
+          { cwd: state.projectDir, timeout: 60000 },
+        ).catch((e) => e);
+        const unitOut = ((unitRes?.stdout || "") + (unitRes?.stderr || "")).trim();
+        const unitFailed = (unitRes?.status ?? 0) !== 0 || /FAILED|ERROR|failed/i.test(unitOut);
+
+        // 3. Playthrough tests (Playthrough.tscn)
+        const playRes = await execAsync(
+          `"${godotBin}" --headless --path "${winPath}" tests/Playthrough.tscn 2>&1`,
+          { cwd: state.projectDir, timeout: 60000 },
+        ).catch((e) => e);
+        const playOut = ((playRes?.stdout || "") + (playRes?.stderr || "")).trim();
+        const playFailed = (playRes?.status ?? 0) !== 0 || /FAILED|ERROR|failed/i.test(playOut);
+
+        if (!unitFailed && !playFailed) {
+          log(colors.green("  [Verifier] Godot acceptance tests PASSED (verifier-confirmed)."));
+          eventBus.emit("system_message", { text: `✓ Godot acceptance tests passed (verifier-confirmed)`, type: "info" });
           emitTaskCompleted(state);
           const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
           await commitVerifiedSubtask(state.projectDir, taskLabel);
@@ -1416,50 +1451,40 @@ ${currentTask}${capWarning}`,
           return { verifierFeedback: "PASS" };
         }
 
-        const newRetryCount = (state.coderRetryCount ?? 0) + 1;
-        const atCap = newRetryCount >= effectiveMaxRetries;
+        const failures = [];
+        if (unitFailed) failures.push(`Unit tests (Test.tscn) FAILED:\n${unitOut.slice(0, 1000)}`);
+        if (playFailed) failures.push(`Playthrough tests (Playthrough.tscn) FAILED:\n${playOut.slice(0, 1000)}`);
+
+        log(colors.red(`  [Verifier] Godot acceptance tests FAILED. Retry ${newRetryCount}.`));
         const capWarning = atCap
-          ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): If you do not provide execute_bash evidence in this response, this subtask will be force-skipped.`
+          ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): fix the failing tests and write all required files.`
           : "";
 
-        const subtaskMeta = state.subtasks?.[state.currentSubtaskIndex];
-        const criteriaHint = subtaskMeta?.acceptanceCriteria
-          ? `\nSuccess evidence: ${subtaskMeta.acceptanceCriteria}\nFailure indicators: ${subtaskMeta.failureCriteria || "test output shows failures or Godot exits non-zero"}`
-          : "";
-
-        const missingReason = !calledBash
-          ? "You have not called execute_bash yet."
-          : "You called execute_bash but did not report \"ACCEPTANCE TEST PASSED\".";
-
-        log(colors.red(`  [Graph] -> Verifier: Godot acceptance test — ${missingReason} Retry ${newRetryCount}/${effectiveMaxRetries}.`));
-        const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
-        const winPath = state.projectDir?.replace(/^\/mnt\/c\//i, "C:/") || state.projectDir;
         return {
           verifierFeedback: "FAIL",
           coderRetryCount: newRetryCount,
           messages: [{
             role: "user",
-            content: `[VERIFIER AUTOMATED FEEDBACK]
+            content: `[VERIFIER AUTOMATED FEEDBACK — GODOT TESTS FAILED]
 
-GODOT ACCEPTANCE TEST requires execute_bash evidence — NOT http_request (Godot has no HTTP server).
+The verifier ran the Godot tests directly and they FAILED. The tests must pass before this subtask is complete.
 
-${missingReason}
+${failures.join("\n\n")}
 
-Required steps:
-1. execute_bash: syntax check: "${godotBin}" --headless --path "${winPath}" --check-only --quit 2>&1
-2. execute_bash: unit tests:   "${godotBin}" --headless --path "${winPath}" tests/Test.tscn 2>&1
-3. execute_bash: playthrough:  "${godotBin}" --headless --path "${winPath}" tests/Playthrough.tscn 2>&1
-4. Report: "ACCEPTANCE TEST PASSED — syntax clean, N unit tests passed, M playthrough tests passed"
-${criteriaHint}
+To fix this, ensure all required files have been written:
+- data/cards.json must contain all new card entries
+- data/enemies.json must contain all new enemy entries
+- scripts/GameState.gd must have the correct starting_deck for each character
+- tests/TestRunner.gd must contain the test functions that assert the new content
 
-Do NOT use http_request. This is a Godot game — there is no web server.
+Do NOT re-run the same tests without first fixing the implementation. Write the missing files using write_file.
 
 CURRENT SUBTASK:
 ${currentTask}${capWarning}`,
           }],
         };
       }
-      // ── end Godot acceptance test bypass ──
+      // ── end Godot acceptance test ──
 
       const response = state.lastCoderResponse || "";
       const hasPassed = /ACCEPTANCE TEST PASSED/i.test(response);
