@@ -145,6 +145,38 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
     );
   }
 
+  // Hazard: minimax orientation inversion — AI plays to LOSE instead of WIN.
+  // The #1 correctness bug in chess AI implementations. Fires when the task
+  // involves chess AI logic (chessAI.ts, getBestMove, minimax).
+  const touchesChessAI = /chessAI|getBestMove|minimax|bestMove|evaluateBoard/i.test(taskAndFiles);
+  if (touchesChessAI) {
+    hazards.push(
+      `⚠️ CHESS AI HAZARD — MINIMAX ORIENTATION MUST BE CORRECT\n` +
+      `evaluateBoard() returns a score from WHITE's perspective: positive = white winning.\n\n` +
+      `WRONG PATTERN (AI plays to LOSE — picks moves that help white):\n` +
+      `  function getBestMove(board, color) {  // color = 'black'\n` +
+      `    let bestValue = -Infinity;          // ← wrong start for black\n` +
+      `    for (const move of moves) {\n` +
+      `      const val = minimax(newBoard, depth-1, ..., false, 'white', ...); // ← wrong\n` +
+      `      if (val > bestValue) { bestValue = val; bestMove = move; } // ← maximizing = helping white\n` +
+      `    }\n` +
+      `  }\n\n` +
+      `CORRECT PATTERN (black minimizes white's advantage):\n` +
+      `  function getBestMove(board, color) {  // color = 'black'\n` +
+      `    const isWhite = color === 'white';\n` +
+      `    let bestValue = isWhite ? -Infinity : +Infinity;  // ← black starts at +Infinity\n` +
+      `    for (const move of moves) {\n` +
+      `      const val = minimax(newBoard, depth-1, ..., !isWhite, opponent, ...); // !isWhite = true when responding to black\n` +
+      `      if (isWhite ? val > bestValue : val < bestValue) { // ← black picks MINIMUM\n` +
+      `        bestValue = val; bestMove = move;\n` +
+      `      }\n` +
+      `    }\n` +
+      `  }\n\n` +
+      `ALSO: NEVER pass hardcoded null for enPassantTarget or {} for castlingRights to getBestMove.\n` +
+      `These must come from useChessGame's real state — hardcoding disables en passant and castling.`,
+    );
+  }
+
   // Hazard: package.json rewriting — the #1 cause of project corruption.
   // When the coder tries to fix build failures, it tends to rewrite package.json from memory,
   // losing the scripts section, react dependencies, or vite config. Always read first, patch minimally.
