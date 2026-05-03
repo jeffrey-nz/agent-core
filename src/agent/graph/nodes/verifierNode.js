@@ -2217,6 +2217,24 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
   // Godot GDScript syntax gate: for Godot projects, run --check-only after any .gd changes.
   // Equivalent to the Swift swiftc -typecheck gate. TypeScript/npm-build gates don't apply.
   if (state.projectType === "godot") {
+    // Extension guard: reject hallucinated non-Godot files (.js, .html, .ts, etc.)
+    const GODOT_OK_EXT = /\.(gd|json|tscn|tres|md|cfg|import|png|svg|wav|ogg|ttf)$/i;
+    const NON_GODOT_CODE = /\.(js|ts|jsx|tsx|html|css|py|cs|cpp|rb|php|sh|vue|java)$/i;
+    const badFiles = (state.modifiedFiles || []).filter((f) => NON_GODOT_CODE.test(f));
+    if (badFiles.length > 0) {
+      const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+      log(colors.red(`  [Verifier] Godot project: coder wrote non-Godot files: ${badFiles.join(", ")} — reject and retry.`));
+      eventBus.emit("system_message", { text: `✗ Wrong file types for Godot project: ${badFiles.join(", ")}`, type: "warning" });
+      return {
+        verifierFeedback: "FAIL",
+        coderRetryCount: newRetryCount,
+        messages: [{
+          role: "user",
+          content: `[VERIFIER AUTOMATED FEEDBACK — WRONG FILE TYPES]\n\nYou wrote non-Godot files: ${badFiles.join(", ")}\n\nThis is a Godot 4.6 GDScript project. ONLY write these file types:\n  .gd, .json, .tscn, .tres\n\nNEVER write .js, .html, .ts, .css, .py, .cs, .cpp or any other non-Godot file.\n\nDelete the wrong files and write the CORRECT Godot files:\n  - scripts/*.gd for GDScript code\n  - data/*.json for game data\n  - tests/*.gd for tests\n\nCURRENT SUBTASK:\n${currentTask}`,
+        }],
+      };
+    }
+
     const hasGdFiles = (state.modifiedFiles || []).some((f) => f.endsWith(".gd"));
     if (hasGdFiles) {
       const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";

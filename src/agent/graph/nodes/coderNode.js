@@ -181,6 +181,16 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
   if (projectType === "godot") {
     const taskAndFiles = `${taskAndNote} ${(currentSubtask?.files || []).join(" ")}`;
 
+    // Always-on: Godot file extension guard — prevent hallucinating web/JS files
+    hazards.push(
+      `🚨 GODOT PROJECT — CRITICAL FILE TYPE RULE:\n` +
+      `This is a Godot 4.6 GDScript project. You MUST ONLY write files with these extensions:\n` +
+      `  .gd (GDScript), .json (data files), .tscn (scenes), .tres (resources)\n` +
+      `NEVER write: .js, .ts, .jsx, .tsx, .html, .css, .py, .cs, .cpp, .rb, .php, .sh\n` +
+      `If you find yourself about to write a .js or .html file — STOP. You are working on a Godot game.\n` +
+      `The files to modify are: scripts/*.gd, data/*.json, tests/*.gd`,
+    );
+
     // Hazard: JSON data file schema — agent must read before writing
     const touchesDataJson = /data\/.*\.json|cards\.json|enemies\.json|relics\.json|events\.json/i.test(taskAndFiles);
     if (touchesDataJson) {
