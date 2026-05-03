@@ -45,7 +45,7 @@ CRITICAL UNITY CONSTRAINTS — MUST FOLLOW:
 - Namespaces in C# scripts should match the folder structure under Assets/ to avoid assembly conflicts.
 - Assembly Definition (.asmdef) files control which scripts belong to which assembly. If a new script should belong to an existing assembly, place it in the correct folder — do not modify .asmdef files unless specifically required.`;
 
-const GODOT_BIN_PATH = "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
+export const GODOT_BIN_PATH = "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
 const GODOT_CONSTRAINTS = `[PROJECT TYPE: Godot 4 / GDScript]
 CRITICAL GODOT CONSTRAINTS — MUST FOLLOW:
 

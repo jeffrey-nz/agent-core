@@ -392,6 +392,7 @@ ${researchDirective}
 PRE-FLIGHT APPLICATION HEALTH CHECK (web/server-side projects — run at the START of research):
 SKIP THIS ENTIRE SECTION if the task is to BUILD A NEW PROJECT from scratch (keywords: "build", "create", "write", "implement" + "new", "from scratch", "from the ground up") — there is no running server yet. Skip directly to codebase analysis.
 SKIP THIS SECTION for React/Vite/Next.js frontend-only projects with NO running dev server — making an http_request to localhost will hang for 60+ seconds and stall the pipeline. If you detect a Vite/React project (package.json contains "vite" or "react-dom"), proceed directly to code reading.
+SKIP THIS SECTION for Godot / Unity / Swift / native game engine projects — they have no HTTP server. Instead run the baseline syntax/test check described in the GODOT/UNITY/SWIFT PROJECT DETECTED section above.
 Before reading any source code, discover the running application URL and make ONE http_request health check:
 1. URL DISCOVERY: Check the project config for the base URL:
    - .env / .env.local file (look for BASE_URL, APP_URL, SS_BASE_URL, SITE_URL, etc.)

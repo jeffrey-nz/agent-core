@@ -9,7 +9,7 @@ import { personaMeta } from "../personas.js";
 import { loadProceduralKnowledge } from "#utils/contextLoader.js";
 import { classifyEnvironmentError } from "#agent/utils/executionOutputAnalysis.js";
 import { MAX_STEPS_CODER, MAX_STEPS_CODER_UNITY } from "#config/pipeline.js";
-import { buildCoderDirective, getCoderMaxSteps, buildAcceptanceTestDirective } from "#utils/projectDirectives.js";
+import { buildCoderDirective, getCoderMaxSteps, buildAcceptanceTestDirective, GODOT_BIN_PATH } from "#utils/projectDirectives.js";
 import { resolveProjectUrl } from "#copilot/run/main/applyFilesPhase/validators/resolveProjectUrl.js";
 import { readFile, access } from "node:fs/promises";
 import path from "node:path";
@@ -175,6 +175,77 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
       `ALSO: NEVER pass hardcoded null for enPassantTarget or {} for castlingRights to getBestMove.\n` +
       `These must come from useChessGame's real state — hardcoding disables en passant and castling.`,
     );
+  }
+
+  // ── Godot / GDScript hazards ─────────────────────────────────────────────
+  if (projectType === "godot") {
+    const taskAndFiles = `${taskAndNote} ${(currentSubtask?.files || []).join(" ")}`;
+
+    // Hazard: JSON data file schema — agent must read before writing
+    const touchesDataJson = /data\/.*\.json|cards\.json|enemies\.json|relics\.json|events\.json/i.test(taskAndFiles);
+    if (touchesDataJson) {
+      hazards.push(
+        `⚠️ GODOT DATA FILE HAZARD — Always read before writing any JSON data file!\n` +
+        `RULE 1: Call read_file on the data/*.json file BEFORE writing any new entries.\n` +
+        `RULE 2: Use the EXACT same field names, nesting, and value types as existing entries.\n` +
+        `RULE 3: Do NOT invent new field names — only use fields that already exist in the file.\n` +
+        `RULE 4: For cards.json, every card needs: id, name, type, cost, description, effects, and a corresponding <id>_plus variant.\n` +
+        `RULE 5: For enemies.json, every enemy needs: the exact keys present in existing enemies (check with read_file).\n` +
+        `RULE 6: Use patch_file to append new entries — do NOT rewrite the entire JSON file from memory.`,
+      );
+    }
+
+    // Hazard: GDScript signal connections — Godot 3 vs Godot 4 syntax
+    const touchesSignals = /connect\(|\.connect|signal|pressed|gui_input/i.test(taskAndFiles);
+    if (touchesSignals) {
+      hazards.push(
+        `⚠️ GDSCRIPT SIGNAL HAZARD — Godot 4 signal syntax ONLY!\n` +
+        `WRONG (Godot 3 — causes "too many arguments" runtime error):\n` +
+        `  node.connect("pressed", self, "_on_button_pressed")\n` +
+        `  node.connect("pressed", self, "_on_button_pressed", [arg])\n\n` +
+        `CORRECT (Godot 4):\n` +
+        `  node.pressed.connect(_on_button_pressed)\n` +
+        `  node.pressed.connect(func(): _on_button_pressed(arg))\n` +
+        `  node.pressed.connect(_on_button_pressed.bind(arg))\n\n` +
+        `Lambda syntax for inline handlers:\n` +
+        `  button.pressed.connect(func(): GameState.reset_run())\n` +
+        `  button.gui_input.connect(func(ev): if ev is InputEventMouseButton: handle(ev))`,
+      );
+    }
+
+    // Hazard: GameState.gd modification — must maintain CHARACTERS dict structure
+    const touchesGameState = /GameState\.gd|CHARACTERS|selected_character|reset_run/i.test(taskAndFiles);
+    if (touchesGameState) {
+      hazards.push(
+        `⚠️ GAMESTATE HAZARD — CHARACTERS dict must be complete!\n` +
+        `Every character entry in CHARACTERS MUST have ALL of these keys:\n` +
+        `  "name": String\n` +
+        `  "subtitle": String\n` +
+        `  "color": Color(...)\n` +
+        `  "icon": String (Unicode char)\n` +
+        `  "description": String\n` +
+        `  "max_hp": int\n` +
+        `  "starting_relic": String (must exist in data/relics.json)\n` +
+        `  "starting_deck": Array[String] (each id must exist in data/cards.json)\n\n` +
+        `RULE: Read scripts/GameState.gd FIRST to see the exact structure before writing.\n` +
+        `RULE: The starting_deck card IDs MUST exist in data/cards.json — add cards BEFORE adding the character, or in the same subtask.\n` +
+        `RULE: Use patch_file to add the new character entry — do NOT rewrite _setup_characters().`,
+      );
+    }
+
+    // Hazard: test runner — must follow existing _assert pattern
+    const touchesTests = /TestRunner\.gd|tests\//i.test(taskAndFiles);
+    if (touchesTests) {
+      hazards.push(
+        `⚠️ GDSCRIPT TEST HAZARD — Follow existing TestRunner.gd patterns exactly!\n` +
+        `RULE 1: Tests use: _assert("label", condition) — where condition evaluates to bool.\n` +
+        `RULE 2: Dict access in tests: GameState.CHARACTERS.get("watcher", {}) — NOT GameState.CHARACTERS["watcher"].\n` +
+        `RULE 3: Call new test functions from _ready() AFTER all existing test calls.\n` +
+        `RULE 4: Each test function must be named _test_something() and contain only _assert() calls.\n` +
+        `RULE 5: After writing tests, run: "${GODOT_BIN_PATH}" --headless --path "C:/Users/Work/card_game" tests/Test.tscn 2>&1\n` +
+        `RULE 6: Do NOT write to Test.tscn or Playthrough.tscn — only edit TestRunner.gd and Playthrough.gd.`,
+      );
+    }
   }
 
   // Hazard: package.json rewriting — the #1 cause of project corruption.
