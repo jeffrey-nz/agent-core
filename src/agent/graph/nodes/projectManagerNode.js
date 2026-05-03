@@ -404,6 +404,15 @@ ACCEPTANCE TEST AUTOMATION RULES (CRITICAL — violations cause infinite retry l
     3. grep/read_file checks — structural verification that required exports/functions exist
   * If the task requires a running server to verify (e.g. HTTP routes), the acceptance test must use the ALREADY-RUNNING server (if the project documents a health endpoint in its README or config), never start a new one.
 - If http_request returns HTTP 500 with a filesystem permission error ("file_put_contents(...): Permission denied", "Unable to write file", "League\\Flysystem\\UnableToWriteFile"), FIX the permissions with execute_bash (chown/chmod on the assets directory) and then retry the http_request. Report "ACCEPTANCE TEST FAILED" only AFTER attempting the permission fix. The fix command is: execute_bash("sudo chown -R www-data:www-data {projectDir}/public/assets && sudo chmod -R 775 {projectDir}/public/assets").
+- GODOT / UNITY / NATIVE GAME ENGINE ACCEPTANCE TESTS (CRITICAL — Godot has no HTTP server):
+  * NEVER use http_request for Godot project acceptance tests — there is no web server to ping.
+  * The ONLY acceptable acceptance test for Godot is execute_bash running the Godot binary headlessly:
+    1. Syntax check: execute_bash('GODOT_BIN="..."; "$GODOT_BIN" --headless --path "C:/..." --check-only --quit 2>&1') — exit 0 means no GDScript parse errors
+    2. Unit tests: execute_bash('GODOT_BIN="..."; "$GODOT_BIN" --headless --path "C:/..." --scene tests/Test.tscn --quit 2>&1') — must exit 0 and print "All tests passed"
+    3. Playthrough tests: same as above with tests/Playthrough.tscn
+  * The acceptance test subtask "files" MUST be [] (no writes — verification only).
+  * Godot paths passed to --path MUST use Windows format (C:/Users/...) not WSL format (/mnt/c/...).
+  * The task description for the Godot acceptance subtask MUST contain the phrase "ACCEPTANCE TEST PASSED" — the verifier uses this exact string to detect a passing acceptance test.
 
 COMPOSER PACKAGE NAME VALIDATION (CRITICAL — prevents adding non-existent packages):
 If the Research Report or Refined Research flags that a Composer package named in the original task description does NOT exist (composer show returned Package not found, or a naming mismatch was noted), you MUST:

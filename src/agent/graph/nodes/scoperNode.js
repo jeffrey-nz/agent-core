@@ -266,7 +266,7 @@ RULES:
   // the coder to make phantom edits on non-existent files.
   const hasLineRefs = /\blines?\s+\d+|\bline\s+\d+|:\d+\b/i.test(scopeDocument);
   // Include doc/config extensions - a scope for creating a new .md file is valid without code extensions.
-  const hasFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json|md|txt|rst|adoc)\b/i.test(scopeDocument);
+  const hasFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json|md|txt|rst|adoc|gd|tscn|tres)\b/i.test(scopeDocument);
   const isFallback = scopeDocument.includes("(Fallback - scoper produced no output)");
   const notFoundCount = (scopeDocument.match(/⚠️ \[NOT FOUND\]/g) || []).length;
   const tooManyNotFound = notFoundCount > 2;
@@ -275,7 +275,7 @@ RULES:
   // line refs - there are no existing files to modify and no line numbers to cite.
   // Detect this by checking if all file references in the scope are doc extensions
   // and no code-file extensions appear (i.e. the whole task is "create new file").
-  const hasCodeFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json)\b/i.test(scopeDocument);
+  const hasCodeFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json|gd|tscn|tres)\b/i.test(scopeDocument);
   const isDocOnlyScope = hasFilePaths && !hasCodeFilePaths;
 
   if (!isFallback && scopeDocument.trim().length > 100 && (!hasLineRefs || !hasFilePaths || tooManyNotFound) && !isDocOnlyScope) {
@@ -341,7 +341,7 @@ Re-output the complete SCOPE DOCUMENT with these line-level details filled in. U
     // a 73-char echo output ("Research complete. Handing off.") from being
     // accepted as a valid scope document after a bash-loop refinement pass.
     const refinedHasLineRefs = /\blines?\s+\d+|\bline\s+\d+|:\d+\b/i.test(refinedDoc);
-    const refinedHasFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json|md|txt)\b/i.test(refinedDoc);
+    const refinedHasFilePaths = /\.(php|js|ts|cs|py|rb|go|java|ss|yml|yaml|json|md|txt|gd|tscn|tres)\b/i.test(refinedDoc);
     const refinedLooksValid = refinedDoc.trim().length > 200 && (refinedHasLineRefs || refinedHasFilePaths);
     if (refinedLooksValid) {
       log(colors.cyan("  [Graph] -> Scoper refinement produced output - using it."));
