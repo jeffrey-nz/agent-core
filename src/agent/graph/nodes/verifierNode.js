@@ -1993,25 +1993,21 @@ DEBUGGING STRATEGY:
       }
     }
 
-    // Auto-pass if all planned files already exist on disk with content.
-    // Handles the case where files were written in a prior subtask and the coder
-    // correctly skips re-writing them — but produces no write_file calls, triggering
-    // this false "no files written" loop.
+    // Auto-pass if all planned files were written by the agent in a PRIOR subtask.
+    // This covers redundant subtasks where the coder correctly skips re-writing a file
+    // it already modified earlier in the session.
+    // IMPORTANT: files that pre-existed in the repo before the session started must NOT
+    // trigger this auto-pass — they need to be modified, not just exist.
     const subtaskFilesForAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.files;
-    if (Array.isArray(subtaskFilesForAutoPass) && subtaskFilesForAutoPass.length > 0 && state.projectDir) {
-      const allExist = await Promise.all(
-        subtaskFilesForAutoPass.map(async (f) => {
-          const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
-          try {
-            const stat = await fs.promises.stat(abs);
-            return stat.size > 20; // non-trivial content
-          } catch {
-            return false;
-          }
-        })
-      );
-      if (allExist.every(Boolean)) {
-        log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) already exist on disk — auto-passing subtask.`));
+    const sessionWritten = new Set(state.allModifiedFiles || []);
+    if (Array.isArray(subtaskFilesForAutoPass) && subtaskFilesForAutoPass.length > 0 && sessionWritten.size > 0) {
+      const allWrittenByAgent = subtaskFilesForAutoPass.every((f) => {
+        const norm = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
+        return sessionWritten.has(f) || sessionWritten.has(norm) ||
+          Array.from(sessionWritten).some((w) => w.endsWith(f) || f.endsWith(path.basename(w)));
+      });
+      if (allWrittenByAgent) {
+        log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) were already modified by the agent this session — auto-passing subtask.`));
         emitTaskCompleted(state);
         const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
         await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
