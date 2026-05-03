@@ -1009,9 +1009,13 @@ ${buildAcceptanceTestDirective(state.projectType)}
     // On repeated stalls (retryCount >= 2), force a fresh browser session so the
     // accumulated chat history (which may be triggering the stall) is cleared.
     // startNewChat() closes the current browser tab; the next sendTurn opens a new one.
-    if (isStallRetry && retryCount >= 2 && state.provider?.startNewChat) {
+    // Lower threshold to 1 when the previous turn was a synthetic empty-response nudge
+    // (EMPTY_RESPONSE synthetic text) — that signals context overflow, not a real stall.
+    const prevWasEmpty = (state.lastCoderResponse || "").includes("[EMPTY_RESPONSE]");
+    const freshChatThreshold = prevWasEmpty ? 1 : 2;
+    if (isStallRetry && retryCount >= freshChatThreshold && state.provider?.startNewChat) {
       log(colors.yellow(
-        `  [Graph] -> Stall detected (retry ${retryCount}) — restarting browser session with fresh context`,
+        `  [Graph] -> Stall detected (retry ${retryCount}${prevWasEmpty ? ", prev empty-response" : ""}) — restarting browser session with fresh context`,
       ));
       eventBus.emit("system_message", {
         text: `⚠️ Stall on retry ${retryCount} — restarting browser session`,
