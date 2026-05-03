@@ -412,7 +412,8 @@ ACCEPTANCE TEST AUTOMATION RULES (CRITICAL — violations cause infinite retry l
     3. Playthrough tests: same as above with tests/Playthrough.tscn
   * The acceptance test subtask "files" MUST be [] (no writes — verification only).
   * Godot paths passed to --path MUST use Windows format (C:/Users/...) not WSL format (/mnt/c/...).
-  * The task description for the Godot acceptance subtask MUST contain the phrase "ACCEPTANCE TEST PASSED" — the verifier uses this exact string to detect a passing acceptance test.
+  * CRITICAL: The subtask "task" field MUST be prefixed with "ACCEPTANCE TEST: " (e.g. "ACCEPTANCE TEST: Run Godot syntax check and unit tests"). The verifier uses this exact prefix to trigger headless Godot test execution — without it, only a GDScript syntax check runs and the full Test.tscn/Playthrough.tscn tests are skipped.
+  * The coder's response text MUST also contain the phrase "ACCEPTANCE TEST PASSED" — the verifier uses this exact string to detect a passing acceptance test.
 
 COMPOSER PACKAGE NAME VALIDATION (CRITICAL — prevents adding non-existent packages):
 If the Research Report or Refined Research flags that a Composer package named in the original task description does NOT exist (composer show returned Package not found, or a naming mismatch was noted), you MUST:
