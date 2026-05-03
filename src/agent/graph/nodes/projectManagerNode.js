@@ -618,8 +618,9 @@ The prompt already specifies the exact file, exact line, and exact change needed
       // lastIndexOf("}") is unreliable when the AI appends extra text with } characters
       // (e.g. PHP code examples like SilverStripe\Core\Extension { ... }) after the JSON block.
       let jsonEnd = -1;
+      let truncationSuffix = "";
       {
-        let depth = 0;
+        const stack = [];
         let inString = false;
         let esc = false;
         for (let i = firstBrace; i < planText.length; i++) {
@@ -628,34 +629,44 @@ The prompt already specifies the exact file, exact line, and exact change needed
           if (ch === "\\" && inString) { esc = true; continue; }
           if (ch === '"') { inString = !inString; continue; }
           if (inString) continue;
-          if (ch === "{" || ch === "[") depth++;
-          else if (ch === "}" || ch === "]") { if (--depth === 0) { jsonEnd = i; break; } }
+          if (ch === "{") stack.push("}");
+          else if (ch === "[") stack.push("]");
+          else if (ch === "}" || ch === "]") {
+            stack.pop();
+            if (stack.length === 0) { jsonEnd = i; break; }
+          }
+        }
+        // Truncation recovery: if JSON was cut off, close all open brackets/braces
+        if (jsonEnd === -1 && stack.length > 0) {
+          truncationSuffix = stack.reverse().join("");
+          log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: JSON truncated (depth ${stack.length}) — appending "${truncationSuffix}" to recover`));
         }
       }
-      if (jsonEnd === -1) throw new Error("No closing brace found for JSON object");
+      if (jsonEnd === -1 && !truncationSuffix) throw new Error("No closing brace found for JSON object");
 
       // Pre-escape composer/npm package-version patterns before sanitizeJsonStrings runs,
       // so that "vendor/pkg": "constraint" inside implementation_note strings are already
       // escaped as \"vendor/pkg\": \"constraint\" and won't cause premature string closure.
       // Also strip Gemini "immersive chip" URL tokens and fix invalid escape sequences.
+      const extractedText = (jsonEnd === -1
+        ? planText.substring(firstBrace) + truncationSuffix
+        : planText.substring(firstBrace, jsonEnd + 1)
+      ).replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/\d+/g, "");
       const rawJson = sanitizeJsonStrings(
         preEscapePackageVersionPatterns(
-          preEscapeQuotesInSingleQuotedCodeRegions(
-            planText.substring(firstBrace, jsonEnd + 1)
-              .replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/\d+/g, ""),
-          ),
+          preEscapeQuotesInSingleQuotedCodeRegions(extractedText),
         ),
       );
       try {
         parsed = JSON.parse(rawJson);
+        if (truncationSuffix) log(colors.dim(`  [Graph] -> Project Manager attempt ${attempt}: truncation recovery succeeded.`));
       } catch {
         // First parse failed — try jsonrepair on the original extracted text (before sanitize
         // mangled any string boundaries). jsonrepair uses structural look-ahead to distinguish
         // embedded quotes from true string terminators, handling patterns like PHP function
         // args ("o", "Link", $this) and .env assignments (VAR="value") that heuristic repair
         // cannot reliably fix.
-        const originalExtracted = planText.substring(firstBrace, jsonEnd + 1)
-          .replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/\d+/g, "");
+        const originalExtracted = extractedText;
         try {
           parsed = JSON.parse(jsonrepair(originalExtracted));
           log(colors.dim(`  [Graph] -> Project Manager attempt ${attempt}: parsed after jsonrepair.`));
