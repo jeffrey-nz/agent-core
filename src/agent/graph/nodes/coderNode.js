@@ -532,6 +532,14 @@ export async function coderNode(state, config) {
       }\n`
     : "";
 
+  // Intent document (intentNode) — success criteria for the overall feature.
+  // Inject on the first attempt so the coder understands what "done" looks like
+  // before writing any code. Skipped on retries to avoid re-adding noise to an
+  // already-long conversation where retry-specific feedback is more actionable.
+  const intentSection = (state.intentDocument && (state.coderRetryCount ?? 0) === 0)
+    ? `\n[FEATURE SUCCESS CRITERIA — what the finished feature must satisfy]\n${state.intentDocument}\nEnsure your implementation satisfies these criteria — do NOT write placeholder code that builds but doesn't fulfil the intent.\n`
+    : "";
+
   // Retrieved context from past sessions (contextRetrieverNode).
   // Inject only on the first attempt — on retries, the coder already has this context
   // and it would just add noise alongside retry-specific feedback.
@@ -752,7 +760,7 @@ ${state.executionPlan}
 ${progressNote}${allModifiedFilesNote}
 [YOUR CURRENT SUBTASK]
 ${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${hazardSection}${reactScaffoldWarning}${testContractBlock}
-${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
+${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${intentSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
 Instructions:
 - [REASONING PROTOCOL] Start your response with a thinking block:\n<think>\nTask: what this subtask achieves\nFiles to write: [every file this subtask needs — list ALL of them]\nRead first: [files that must be read before writing, or "none"]\n</think>\nThen IMMEDIATELY output the JSON array with ALL tool calls.
 - [BATCH WRITING] Write ALL files for this subtask in ONE JSON array. Do NOT write one file, wait for results, then write the next. For a subtask with 5 files: put all 5 write_file calls in a single array. When done: output TASK_DONE.

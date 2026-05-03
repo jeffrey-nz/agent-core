@@ -142,6 +142,71 @@ function sanitizeJsonStrings(str) {
 // When a split is detected, the affected subtasks are MERGED into a single subtask
 // with a combined file list and an ATOMIC MIGRATION implementation note.
 function consolidateAtomicSubtasks(subtasks, projectType) {
+  // ── React/TypeScript: App.tsx wiring consolidation ──────────────────────────
+  // When a hook's return signature changes (new exports added) AND a separate
+  // subtask wires those exports in App.tsx, the intermediate state (new hook,
+  // old App.tsx) is a TypeScript compile error. tsc --noEmit fires on the first
+  // subtask before the wiring subtask can fix it, causing an infinite rollback loop.
+  // Detect by finding one subtask that creates/modifies a hook AND another that
+  // wires it in App.tsx, and merge them.
+  if (projectType === "react" || projectType === "node" || projectType === "unknown") {
+    const APP_TSX_RE = /\bApp\.(tsx?|jsx?)\b/;
+    const HOOK_RE = /\b(?:use[A-Z]\w+)\.(tsx?|ts)\b|\/hooks\//;
+
+    // Find subtasks that touch a custom hook file
+    const hookSubtaskIndices = subtasks.reduce((acc, s, i) => {
+      const files = (s.files || []).join(" ");
+      const text = `${s.task} ${files}`;
+      if (HOOK_RE.test(text) && !APP_TSX_RE.test(files)) acc.push(i);
+      return acc;
+    }, []);
+
+    // Find subtasks that only touch App.tsx (wiring step)
+    const appWiringIndices = subtasks.reduce((acc, s, i) => {
+      const files = (s.files || []).join(" ");
+      const text = `${s.task} ${files}`;
+      if (APP_TSX_RE.test(text) && !HOOK_RE.test(text)) acc.push(i);
+      return acc;
+    }, []);
+
+    // Only consolidate if there's exactly one hook subtask immediately followed by
+    // one App.tsx wiring subtask (the classic "write hook → wire in App" split).
+    if (hookSubtaskIndices.length === 1 && appWiringIndices.length === 1) {
+      const hookIdx = hookSubtaskIndices[0];
+      const appIdx = appWiringIndices[0];
+      // Must be adjacent (hookIdx + 1 === appIdx) to be worth consolidating
+      if (appIdx === hookIdx + 1) {
+        const hookSub = subtasks[hookIdx];
+        const appSub = subtasks[appIdx];
+        const allFiles = [...new Set([...(hookSub.files || []), ...(appSub.files || [])])];
+        const combinedNote =
+          `⚠️ ATOMIC HOOK+WIRING — write hook changes AND App.tsx wiring in ONE pass.\n` +
+          `tsc --noEmit runs after EVERY subtask; if the hook's return signature changes but App.tsx still uses the old shape, the TypeScript check fails and rolls back the hook before wiring can happen.\n\n` +
+          `--- Hook subtask ---\n${hookSub.implementationNote || hookSub.task}\n\n` +
+          `--- App.tsx wiring ---\n${appSub.implementationNote || appSub.task}`;
+
+        log(colors.yellow(
+          `  [Graph] -> Project Manager: detected hook+App.tsx wiring split (subtasks ${hookIdx + 1} and ${appIdx + 1}) — consolidating into one atomic subtask.`,
+        ));
+
+        const merged = {
+          id: hookSub.id,
+          task: `[ATOMIC] ${hookSub.task} and wire in App.tsx`,
+          files: allFiles,
+          lineRange: [hookSub.lineRange, appSub.lineRange].filter(Boolean).join("; "),
+          implementationNote: combinedNote,
+          constraints: [hookSub.constraints, appSub.constraints].filter(Boolean).join("; "),
+          acceptanceCriteria: appSub.acceptanceCriteria || hookSub.acceptanceCriteria || "",
+          failureCriteria: "",
+        };
+
+        const result = subtasks.filter((_, i) => i !== hookIdx && i !== appIdx);
+        result.splice(hookIdx, 0, merged);
+        subtasks = result.map((s, i) => ({ ...s, id: i + 1 }));
+      }
+    }
+  }
+
   if (projectType !== "swift") return subtasks;
 
   // Regex identifying subtasks related to @Observable or ObservableObject migration

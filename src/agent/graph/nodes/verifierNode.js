@@ -2265,6 +2265,39 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
           log(colors.red(`  [Graph] -> TypeScript typecheck found errors. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
           eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: compilation/syntax errors - reverting and retrying`, type: "warning" });
           await archiveAndRevert(state);
+
+          // ── TypeScript Error Stagnation Detection ──────────────────────────────
+          // When the SAME TypeScript error appears on consecutive retries, the coder
+          // is stuck in a single-strategy loop. Escalate to the Debugger by bumping
+          // coderRetryCount to DEBUGGER_TRIGGER_RETRIES (mirrors the Swift path).
+          if (newRetryCount >= 2) {
+            const errorSig = allTscErrors.slice(0, 3).join("|").slice(0, 200);
+            if (errorSig) {
+              const priorVerifierMsg = [...(state.messages || [])]
+                .reverse()
+                .find((m) =>
+                  m.role === "user" &&
+                  typeof m.content === "string" &&
+                  m.content.includes("[VERIFIER AUTOMATED FEEDBACK — TYPESCRIPT ERRORS]"),
+                );
+              const isStagnant = priorVerifierMsg && priorVerifierMsg.content.includes(errorSig.slice(0, 80));
+              if (isStagnant) {
+                const escalatedCount = Math.max(newRetryCount, DEBUGGER_TRIGGER_RETRIES);
+                log(colors.red(
+                  `  [Graph] -> Verifier: STAGNANT TypeScript error (retry ${newRetryCount}) — escalating to debugger (retryCount→${escalatedCount}).`,
+                ));
+                return {
+                  verifierFeedback: "FAIL",
+                  coderRetryCount: escalatedCount,
+                  messages: [{
+                    role: "user",
+                    content: `[VERIFIER AUTOMATED FEEDBACK — STAGNANT TYPESCRIPT ERROR]\n\nThe SAME TypeScript error has appeared on ${newRetryCount} consecutive attempts without progress. The Debugger will now investigate.\n\n=== STAGNANT ERRORS (unchanged across ${newRetryCount} retries) ===\n${tscErrors}\n\nCURRENT SUBTASK:\n${currentTask}`,
+                  }],
+                };
+              }
+            }
+          }
+
           const atCap = newRetryCount >= effectiveMaxRetries;
           const capWarning = atCap
             ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL TypeScript errors in this response.`
@@ -2380,6 +2413,34 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
             log(colors.red(`  [Verifier] Build failed. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
             eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: npm run build failed`, type: "warning" });
             await archiveAndRevert(state);
+
+            // Build error stagnation: if the same error appears on consecutive retries,
+            // escalate to the Debugger rather than letting the coder loop indefinitely.
+            if (newRetryCount >= 2 && errorLines) {
+              const buildSig = errorLines.slice(0, 150);
+              const priorBuildMsg = [...(state.messages || [])]
+                .reverse()
+                .find((m) =>
+                  m.role === "user" &&
+                  typeof m.content === "string" &&
+                  m.content.includes("[VERIFIER AUTOMATED FEEDBACK — BUILD FAILED]"),
+                );
+              if (priorBuildMsg && priorBuildMsg.content.includes(buildSig.slice(0, 80))) {
+                const escalatedCount = Math.max(newRetryCount, DEBUGGER_TRIGGER_RETRIES);
+                log(colors.red(
+                  `  [Verifier] STAGNANT build error (retry ${newRetryCount}) — escalating to debugger (retryCount→${escalatedCount}).`,
+                ));
+                return {
+                  verifierFeedback: "FAIL",
+                  coderRetryCount: escalatedCount,
+                  messages: [{
+                    role: "user",
+                    content: `[VERIFIER AUTOMATED FEEDBACK — STAGNANT BUILD ERROR]\n\nThe SAME npm run build error has appeared on ${newRetryCount} consecutive attempts. The Debugger will now investigate.\n\n=== STAGNANT BUILD ERRORS ===\n${errorLines}\n\nCURRENT SUBTASK:\n${currentTask}`,
+                  }],
+                };
+              }
+            }
+
             const atCap = newRetryCount >= effectiveMaxRetries;
             const capWarning = atCap
               ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): Fix ALL build errors.`
@@ -2422,7 +2483,7 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
         ).then(() => true).catch(() => false);
         const gameComponentExists = hasChessBoardFile || hasGameBoardFile;
         // Look for any component or hook that would indicate real wiring
-        const importsGame = /import[^;]+(?:ChessBoard|GameBoard|useChessGame|useGameState|useChess|useGame)\b/i.test(content);
+        const importsGame = /import[^;]+(?:ChessBoard|GameBoard|useChessGame|useGameState|useChess|useGame|useChessAI)\b/i.test(content);
         const rendersGame = /<(?:ChessBoard|GameBoard)\b|(?:useChessGame|useGameState|useChess|useGame)\s*\(/i.test(content);
         const isPlaceholder = gameComponentExists && (!importsGame || !rendersGame);
         if (isPlaceholder) {
@@ -2439,6 +2500,30 @@ Do NOT output [] without reading the JSX first. The verifier checks your respons
               content: `[VERIFIER APP.TSX REGRESSION]\n\nApp.tsx was written as a placeholder component that only renders a <div> with text. This destroys all game functionality.\n\nDO NOT write App.tsx like this:\n  export default function App() {\n    return <div>Chess Game</div>;\n  }\n\nApp.tsx MUST import and render the actual game components. If the game components (e.g. ChessBoard) don't exist yet, create them in this subtask too, or write App.tsx to import them once available:\n  import { ChessBoard } from './components/ChessBoard';\n  import { useChessGame } from './hooks/useChessGame';\n  export default function App() {\n    const game = useChessGame();\n    return <div className="app"><ChessBoard board={game.board} /></div>;\n  }\n\nFix by rewriting App.tsx with the actual game component tree.\n\nCURRENT SUBTASK:\n${currentTask}`,
             }],
           };
+        }
+
+        // AI hook wiring check: if useChessAI.ts exists, App.tsx must call it.
+        // This was previously missed because the build passed (TypeScript compiled fine)
+        // even when App.tsx hardcoded null/empty values instead of using the real hook.
+        const hasAIHookFile = await fs.promises.access(
+          path.join(projectDir, "src", "hooks", "useChessAI.ts")
+        ).then(() => true).catch(() => false);
+        if (hasAIHookFile) {
+          const callsAIHook = /useChessAI\s*\(/i.test(content);
+          if (!callsAIHook) {
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            log(colors.red(`  [Verifier] App.tsx does not call useChessAI() even though useChessAI.ts exists. Retry ${newRetryCount}.`));
+            eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: App.tsx missing useChessAI wiring`, type: "warning" });
+            await archiveAndRevert(state);
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER APP.TSX AI HOOK MISSING]\n\nuseChessAI.ts exists but App.tsx does not call useChessAI(). The AI opponent will never make a move.\n\nApp.tsx MUST:\n1. import { useChessAI } from './hooks/useChessAI';\n2. Call useChessAI({ board, currentTurn, gameOver, enPassantTarget, castlingRights, onMove: executeMove }) inside the App function body.\n3. Pass real state values from useChessGame — NOT hardcoded null/empty values.\n\nRequired wiring:\n  const { board, currentTurn, gameOver, enPassantTarget, castlingRights, executeMove } = useChessGame();\n  useChessAI({ board, currentTurn, gameOver, enPassantTarget, castlingRights, onMove: executeMove });\n\nFix App.tsx to include the useChessAI call.\n\nCURRENT SUBTASK:\n${currentTask}`,
+              }],
+            };
+          }
         }
       } catch { /* non-fatal */ }
     }

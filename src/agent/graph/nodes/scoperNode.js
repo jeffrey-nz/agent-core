@@ -144,6 +144,9 @@ RULES:
   /** @type {import('ai').ModelMessage[]} */
   const messages = [
     { role: "system", content: systemPrompt },
+    ...(state.intentDocument
+      ? [{ role: "user", content: `[USER INTENT ANALYSIS — success criteria to guide your scoping]\n${state.intentDocument}` }]
+      : []),
     {
       role: "user",
       content: `ORIGINAL TASK:\n${userTask}${invariantsBlock}${refinedBlock}\n\nFULL RESEARCH REPORT (verify all paths with tools):\n${researchReport}`,
