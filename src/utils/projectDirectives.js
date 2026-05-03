@@ -45,14 +45,15 @@ CRITICAL UNITY CONSTRAINTS — MUST FOLLOW:
 - Namespaces in C# scripts should match the folder structure under Assets/ to avoid assembly conflicts.
 - Assembly Definition (.asmdef) files control which scripts belong to which assembly. If a new script should belong to an existing assembly, place it in the correct folder — do not modify .asmdef files unless specifically required.`;
 
+const GODOT_BIN_PATH = "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
 const GODOT_CONSTRAINTS = `[PROJECT TYPE: Godot 4 / GDScript]
 CRITICAL GODOT CONSTRAINTS — MUST FOLLOW:
 
 SYNTAX VERIFICATION (MANDATORY after every .gd file write):
 - After writing or patching any .gd file, verify with:
-  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1')
-  GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  GODOT_BIN=${GODOT_BIN_PATH}
   WIN_PATH = project path in Windows format (e.g. C:/Users/Work/card_game — NOT the /mnt/c/ WSL form)
+  execute_bash("\\\"$GODOT_BIN\\\" --headless --path \\\"$WIN_PATH\\\" --check-only --quit 2>&1")
   Exit code 0 with no "SCRIPT ERROR" lines = syntax clean. Any error = fix before proceeding.
 
 GDSCRIPT 4 SYNTAX RULES (violations cause SCRIPT ERROR at --check-only time):
@@ -82,8 +83,9 @@ PROJECT STRUCTURE:
 - Autoloads (global singletons): GameState, CardDB, Palette, SettingsManager, SaveManager
 
 TESTING:
-- Unit tests: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Test.tscn 2>&1') — exits 0 = pass
-- Playthrough: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Playthrough.tscn 2>&1') — exits 0 = pass
+  GODOT_BIN=${GODOT_BIN_PATH}
+- Unit tests: execute_bash("\\\"$GODOT_BIN\\\" --headless --path \\\"$WIN_PATH\\\" tests/Test.tscn 2>&1") — exits 0 = pass
+- Playthrough: execute_bash("\\\"$GODOT_BIN\\\" --headless --path \\\"$WIN_PATH\\\" tests/Playthrough.tscn 2>&1") — exits 0 = pass
 - When adding new features, add _assert() calls to tests/TestRunner.gd`;
 
 const CSHARP_CONSTRAINTS = `[PROJECT TYPE: C# / .NET]
@@ -444,11 +446,11 @@ GODOT PROJECT DETECTED. During your research you MUST specifically investigate:
 2. Read ALL scripts in scripts/ — especially autoloads (GameState.gd, CardDB.gd, etc.) to understand the data model and existing API.
 3. For tasks adding cards/enemies/relics/events: read the corresponding data/*.json file to understand the schema before writing new entries.
 4. Run the baseline syntax check to confirm the project is clean before any changes:
-   GODOT_BIN=/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
-   execute_bash('"${GODOT_BIN}" --headless --path "C:/Users/Work/card_game" --check-only --quit 2>&1')
+   GODOT_BIN=${GODOT_BIN_PATH}
+   execute_bash("\\"$GODOT_BIN\\" --headless --path \\"C:/Users/Work/card_game\\" --check-only --quit 2>&1")
    Include the full output in KEY FINDINGS SUMMARY. If errors exist, note them.
 5. Run the baseline unit tests:
-   execute_bash('"${GODOT_BIN}" --headless --path "C:/Users/Work/card_game" tests/Test.tscn 2>&1')
+   execute_bash("\\"$GODOT_BIN\\" --headless --path \\"C:/Users/Work/card_game\\" tests/Test.tscn 2>&1")
    Include full output in KEY FINDINGS SUMMARY (pass/fail count).
 6. Identify which scripts and data files need modification for the task.
 7. Check tests/TestRunner.gd to understand existing test coverage and how to add new tests.
@@ -624,9 +626,9 @@ const UNITY_CODER_DIRECTIVE = `
 
 const GODOT_CODER_DIRECTIVE = `
 - GODOT SYNTAX CHECK (CRITICAL — run after EVERY .gd file write):
-  GODOT_BIN=/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  GODOT_BIN=${GODOT_BIN_PATH}
   WIN_PATH = project dir in Windows format (e.g. C:/Users/Work/card_game, not /mnt/c/... WSL form)
-  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1')
+  execute_bash("\\"$GODOT_BIN\\" --headless --path \\"$WIN_PATH\\" --check-only --quit 2>&1")
   Exit 0 + no "SCRIPT ERROR" lines = clean. Fix any error before proceeding.
 
 - DATA FILE FORMAT: JSON files in data/ have specific schemas. ALWAYS read the existing data file before adding new entries — use the exact same field names, nesting, and value types as existing entries. NEVER guess the schema.
@@ -728,11 +730,11 @@ const WEB_ACCEPTANCE_TEST_DIRECTIVE =
 
 const GODOT_ACCEPTANCE_TEST_DIRECTIVE =
   `- ACCEPTANCE TEST SUBTASKS: For tasks beginning with "ACCEPTANCE TEST:" - do NOT write any files and do NOT use http_request (Godot is a game engine with no HTTP server). Instead, use execute_bash to run the Godot headless test suite:
-  GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+  GODOT_BIN = ${GODOT_BIN_PATH}
   WIN_PATH = project directory in Windows format (e.g. C:/Users/Work/card_game)
-  1. Syntax check: execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" --check-only --quit 2>&1') — exit 0, no SCRIPT ERROR
-  2. Unit tests:   execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Test.tscn 2>&1') — exit 0, all pass
-  3. Playthrough:  execute_bash('"${GODOT_BIN}" --headless --path "${WIN_PATH}" tests/Playthrough.tscn 2>&1') — exit 0, all pass
+  1. Syntax check: execute_bash("\\"$GODOT_BIN\\" --headless --path \\"$WIN_PATH\\" --check-only --quit 2>&1") — exit 0, no SCRIPT ERROR
+  2. Unit tests:   execute_bash("\\"$GODOT_BIN\\" --headless --path \\"$WIN_PATH\\" tests/Test.tscn 2>&1") — exit 0, all pass
+  3. Playthrough:  execute_bash("\\"$GODOT_BIN\\" --headless --path \\"$WIN_PATH\\" tests/Playthrough.tscn 2>&1") — exit 0, all pass
   Report: "ACCEPTANCE TEST PASSED — syntax clean, N unit tests passed, M playthrough tests passed"
   If any test fails: read the error output to identify the failing GDScript, fix with write_file/patch_file, re-run.
   CRITICAL: (1) Never use http_request — there is no web server. (2) Quote the test output showing pass/fail counts as evidence. (3) Test count must be >= the count before this task started (adding features MUST add tests).`;
@@ -778,9 +780,9 @@ Example:
 
 const GODOT_PLANNER_VERIFICATION = `
 For Godot projects the LAST subtask MUST be an acceptance test using execute_bash evidence — NOT http_request (Godot is a game engine with no HTTP server):
-- GODOT_BIN = /mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe
+- GODOT_BIN = ${GODOT_BIN_PATH}
 - WIN_PATH = project path in Windows format (e.g. C:/Users/Work/card_game)
-- The acceptanceCriteria MUST say: "execute_bash: '${GODOT_BIN}' --headless --path '${WIN_PATH}' tests/Test.tscn 2>&1 exits 0 AND shows N passed, 0 failed. Also run Playthrough.tscn and confirm 0 failures."
+- The acceptanceCriteria MUST say: "execute_bash: GODOT_BIN --headless --path WIN_PATH tests/Test.tscn 2>&1 exits 0 AND shows N passed, 0 failed. Also run Playthrough.tscn and confirm 0 failures."
 - The implementationNote MUST include the exact execute_bash commands with GODOT_BIN and WIN_PATH filled in.
 - NEVER write "http_request" or any URL in a Godot acceptance test.
 - The test count in the acceptance result MUST be >= the baseline (features must add test coverage).
