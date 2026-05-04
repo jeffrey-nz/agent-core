@@ -1028,6 +1028,19 @@ ${buildAcceptanceTestDirective(state.projectType)}
       }
     }
 
+    // Publish current graph state to the provider so that if a session rotation
+    // fires mid-turn the handoff message includes a full project overview.
+    state.provider?.setSessionContext?.({
+      projectGoal: state.initialPrompt,
+      executionPlan: state.executionPlan,
+      subtasks: state.subtasks,
+      currentSubtaskIndex: state.currentSubtaskIndex,
+      allModifiedFiles: state.allModifiedFiles,
+      projectDir: state.projectDir,
+      researchSummary: state.researchSummary,
+      reflexionMemory: state.reflexionMemory,
+    });
+
     // Signal to segmentBoundary that a subtask is in-flight — defer session rotation
     // until this subtask completes to avoid mid-subtask context loss.
     state.provider?.setSubtaskActive?.(true);

@@ -17,6 +17,7 @@ export async function createProvider(providerName, opts = {}) {
     lastResponseText: "",
     segmentIndex: 0,
     subtaskActive: false, // set true by coderNode to defer mid-subtask rotation
+    sessionContext: null, // rich graph-state context for rotation handoff
     eventBus,
   };
 
@@ -50,6 +51,10 @@ export async function createProvider(providerName, opts = {}) {
 
     setSubtaskActive(active) {
       automationState.subtaskActive = Boolean(active);
+    },
+
+    setSessionContext(ctx) {
+      automationState.sessionContext = ctx || null;
     },
 
     // Placeholder, will be replaced after createTurnExecutor

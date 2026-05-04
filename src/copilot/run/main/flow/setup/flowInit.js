@@ -19,10 +19,10 @@ export async function initializeFlow(options, gitDir) {
   // Read reasoningMode from task config if available, otherwise use global
   const reasoningMode = options.reasoningMode || getReasoningMode() || "none";
 
-  const providerOpts =
-    providerName === "copilot365" && gitDir
-      ? { getProgressSummary: () => getGitChangedFiles(gitDir), reasoningMode }
-      : { reasoningMode };
+  const providerOpts = {
+    reasoningMode,
+    ...(gitDir ? { getProgressSummary: () => getGitChangedFiles(gitDir) } : {}),
+  };
 
   const provider = await createProvider(providerName, providerOpts);
 

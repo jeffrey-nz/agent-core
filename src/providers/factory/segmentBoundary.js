@@ -65,6 +65,25 @@ export async function handleSegmentBoundary({
     }
   }
 
+  const sessionCtx = automationState.sessionContext;
+  const subtasks = sessionCtx?.subtasks;
+  const currentIdx = sessionCtx?.currentSubtaskIndex ?? 0;
+
+  // Emit for all providers so the UI can show a rich handoff card
+  eventBus.emit("session_handoff", {
+    segmentIndex,
+    previousMessageCount,
+    threshold: rotationThreshold,
+    providerName,
+    gitDiffStat: progressSummary,
+    timestamp: new Date().toISOString(),
+    projectGoal: sessionCtx?.projectGoal,
+    subtasks: subtasks?.map((s) => ({ id: s.id, task: s.task, files: s.files })),
+    currentSubtaskIndex: currentIdx,
+    allModifiedFiles: sessionCtx?.allModifiedFiles,
+  });
+
+  // Keep legacy event for copilot365 for backwards compatibility
   if (providerName === "copilot365") {
     eventBus.emit("copilot365_segment_boundary", {
       segmentIndex,
@@ -82,7 +101,7 @@ export async function handleSegmentBoundary({
   const newPayload = injectRotationHandoff(
     payload,
     automationState.lastResponseText,
-    { segmentIndex, progressSummary, providerName },
+    { segmentIndex, progressSummary, providerName, sessionContext: sessionCtx },
   );
   automationState.lastResponseText = "";
 
