@@ -216,6 +216,14 @@ export async function handleWriteFile(input, { rootDir, state, allowedDirs = [] 
   if (typeof input.content !== "string") {
     return `[ERROR writing ${input.path || "unknown"}]\nValidation Error: write_file requires a 'content' parameter containing the file text.`;
   }
+  if (input.content.trim().length === 0) {
+    return (
+      `[ERROR writing ${input.path || "unknown"}]\n` +
+      `Content is empty. You MUST provide the actual file content in the 'content' parameter.\n` +
+      `Writing an empty file is a pipeline failure — the verifier will reject it immediately.\n` +
+      `Re-read the file if needed, then write the complete implementation now.`
+    );
+  }
   if (isJunkRootFile(input.path, rootDir, allowedDirs)) {
     return (
       `[BLOCKED] Writing .md/.txt report files directly to a project root is not allowed. ` +

@@ -6,6 +6,7 @@ import { handleNoActivity } from "./protocolEnforcer.js";
 import { SESSION_PHASES, isWritePhase } from "../../../../session/phases.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
+import { eventBus } from "#web/eventBus.js";
 
 export async function runAutomationAgentLoop({
   remoteSessionId,
@@ -86,6 +87,23 @@ export async function runAutomationAgentLoop({
 
   for (let step = 0; step < state.maxSteps; step++) {
     if (state.aborted) break;
+
+    // ── EMPTY_RESPONSE early exit ──────────────────────────────────────────
+    // When the browser provider returns [EMPTY_RESPONSE], DeepSeek's context is
+    // overloaded — sending more follow-ups in the same session won't help and
+    // just burns retries. Trigger rotation immediately so the next outer retry
+    // starts with a fresh session and a clean context window.
+    if (String(state.responseText || "").includes("[EMPTY_RESPONSE]")) {
+      log(colors.yellow(
+        `  [Protocol] ${state.label}: [EMPTY_RESPONSE] received — triggering session rotation (context overflow).`,
+      ));
+      eventBus.emit("system_message", {
+        text: `⚠️ AI returned empty response (context overflow) — resetting session`,
+        type: "warning",
+      });
+      state.needsRotation = true;
+      break;
+    }
 
     const parsed = parseAgentStep(state.responseText);
     const normalized = String(state.responseText || "")

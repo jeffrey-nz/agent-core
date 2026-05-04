@@ -1081,10 +1081,20 @@ ${buildAcceptanceTestDirective(state.projectType)}
             `  [Graph] -> ANTI-STALL NUCLEAR OVERRIDE after ${stallCount} consecutive stalls`,
           ));
           const bareTask = state.subtasks?.[state.currentSubtaskIndex]?.task || "complete the subtask";
+          const plannedFiles = state.subtasks?.[state.currentSubtaskIndex]?.files || [];
+          const fileHint = plannedFiles.length > 0
+            ? `\nFiles you must write:\n${plannedFiles.map((f) => `  - ${path.isAbsolute(f) ? f : path.join(state.projectDir, f)}`).join("\n")}`
+            : `\nProject directory: ${state.projectDir}`;
           return {
             messages: [{
               role: "user",
-              content: `OUTPUT ONLY THIS JSON ARRAY, NOTHING ELSE:\n[{"tool":"write_file","input":{"path":"<file path>","content":"<file content>"}}]\n\nTask: ${bareTask}`,
+              content:
+                `[STALL RECOVERY — attempt ${stallCount}]\n` +
+                `Your previous turns produced no file writes. Output a JSON tool call array NOW.\n` +
+                `Task: ${bareTask}${fileHint}\n\n` +
+                `Example (replace with real path and content):\n` +
+                `[{"tool":"write_file","path":"${state.projectDir}/src/example.ts","content":"// your code here"}]\n\n` +
+                `Rules: path must be absolute under ${state.projectDir}. content must be non-empty. No prose.`,
             }],
             modifiedFiles: [],
             lastCoderResponse: `[STALL NUCLEAR OVERRIDE ${stallCount}]`,
