@@ -9,7 +9,8 @@ import {
 } from "./interaction/errorHandler.js";
 import { eventBus } from "#web/eventBus.js";
 
-export async function sendRemoteTurn(sessionId, text, label, signal) {
+export async function sendRemoteTurn(sessionId, text, label, signal, opts = {}) {
+  const { attachments = [] } = opts;
   const safeText = typeof text === "string" ? text : JSON.stringify(text);
 
   // Track the active remote session ID so the WS abort handler can send a
@@ -20,7 +21,7 @@ export async function sendRemoteTurn(sessionId, text, label, signal) {
 
   log(
     colors.cyan(
-      `\n  [API Debug] Sending turn '${label}' to ${getBaseUrl()}/api/ask (Session: ${sessionId?.slice(0, 8)})`,
+      `\n  [API Debug] Sending turn '${label}' to ${getBaseUrl()}/api/ask (Session: ${sessionId?.slice(0, 8)})${attachments.length ? ` [+${attachments.length} image(s)]` : ""}`,
     ),
   );
 
@@ -29,7 +30,7 @@ export async function sendRemoteTurn(sessionId, text, label, signal) {
 
   let res;
   try {
-    res = await doFetch(sessionId, safeText, { label, signal });
+    res = await doFetch(sessionId, safeText, { label, signal, attachments });
   } catch (err) {
     telemetry.stop();
     log(

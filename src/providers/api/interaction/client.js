@@ -62,12 +62,14 @@ async function doFetchWithRetry(sessionId, safeText, opts, attempt = 1) {
   const baseUrl = getBaseUrl();
   const label = opts.label ?? null;
   const signal = opts.signal ?? null;
+  const attachments = opts.attachments ?? [];
   const isReviewer = /reviewer/i.test(label ?? "");
   const timeoutMs = opts.timeoutMs ?? (isReviewer ? REVIEWER_FETCH_TIMEOUT_MS : FETCH_TIMEOUT_MS);
   const body = JSON.stringify({
     sessionId,
     prompt: safeText,
     ...(label ? { label } : {}),
+    ...(attachments.length ? { images: attachments } : {}),
   });
 
   try {

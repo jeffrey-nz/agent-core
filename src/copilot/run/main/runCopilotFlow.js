@@ -62,6 +62,11 @@ export async function runCopilotFlow(options = {}) {
 
   const provider = await initializeFlow(options, gitDir);
 
+  // Forward any user-attached images to the first AI turn
+  if (sessionInfo?.images?.length) {
+    provider.setInitialAttachments?.(sessionInfo.images);
+  }
+
   const requestId = sessionInfo?.sessionId || 'unknown';
 
   // Pre-upgrade backup

@@ -18,6 +18,7 @@ export async function createProvider(providerName, opts = {}) {
     segmentIndex: 0,
     subtaskActive: false, // set true by coderNode to defer mid-subtask rotation
     sessionContext: null, // rich graph-state context for rotation handoff
+    pendingAttachments: [], // base64 images to send on the next turn, then cleared
     eventBus,
   };
 
@@ -55,6 +56,10 @@ export async function createProvider(providerName, opts = {}) {
 
     setSessionContext(ctx) {
       automationState.sessionContext = ctx || null;
+    },
+
+    setInitialAttachments(images) {
+      automationState.pendingAttachments = Array.isArray(images) ? images : [];
     },
 
     // Placeholder, will be replaced after createTurnExecutor
