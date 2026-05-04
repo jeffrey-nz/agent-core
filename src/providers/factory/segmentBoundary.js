@@ -7,7 +7,7 @@ import { injectRotationHandoff } from "./rotation.js";
 // Raised thresholds so coders have more room within a single session.
 // A typical subtask uses 4-8 messages: initial prompt + reads + write batch + verify.
 // Old: 15 (copilot365), 20 (deepseek). New: 22 / 30.
-const ROTATION_THRESHOLDS = {
+export const ROTATION_THRESHOLDS = {
   copilot365: 22,
   deepseek: 30,
 };
@@ -69,6 +69,8 @@ export async function handleSegmentBoundary({
     eventBus.emit("copilot365_segment_boundary", {
       segmentIndex,
       previousMessageCount,
+      threshold: rotationThreshold,
+      providerName,
       gitDiffStat: progressSummary,
       timestamp: new Date().toISOString(),
     });

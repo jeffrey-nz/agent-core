@@ -86,7 +86,7 @@ export async function runAutomationApiTurn({
 
   try {
     const loopRes = await runAutomationAgent({
-      state,
+      state: { ...state, providerName },
       rootDir,
       toolContext,
       label,
