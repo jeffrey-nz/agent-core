@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "scripts": {
+    "test": "NODE_ENV=test node --test tests/"
+  },
   "imports": {
     "#agent/*": "./src/agent/*",
     "#benchmark/*": "./src/benchmark/*",
