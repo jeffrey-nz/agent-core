@@ -20,7 +20,10 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        # --legacy-peer-deps: tree-sitter-go pins an older peer of tree-sitter
+        # than tree-sitter-php/python/rust. The conflict is harmless at runtime
+        # since these are optional peers.
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Syntax-check all source files
         run: find src -name '*.js' | xargs -n1 node --check
