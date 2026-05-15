@@ -1006,13 +1006,21 @@ ${buildAcceptanceTestDirective(state.projectType)}
       eventBus.emit("spinner_update", { status: label });
     }, 10000);
 
-    // On repeated stalls (retryCount >= 2), force a fresh browser session so the
-    // accumulated chat history (which may be triggering the stall) is cleared.
+    // On a stall, force a fresh browser session so the accumulated chat history
+    // (often a half-finished response that's blocking new turns) is cleared.
     // startNewChat() closes the current browser tab; the next sendTurn opens a new one.
-    // Lower threshold to 1 when the previous turn was a synthetic empty-response nudge
-    // (EMPTY_RESPONSE synthetic text) — that signals context overflow, not a real stall.
-    const prevWasEmpty = (state.lastCoderResponse || "").includes("[EMPTY_RESPONSE]");
-    const freshChatThreshold = prevWasEmpty ? 1 : 2;
+    //
+    // Threshold rules:
+    //  - TURN_SKIPPED (provider polling timeout) → retry 1: prior tab has a stuck
+    //    half-complete thinking state; a fresh tab is the only reliable recovery.
+    //    Previously this was retry 2, which cost an extra ~7min timeout cycle.
+    //  - EMPTY_RESPONSE (synthetic nudge) → retry 1: signals context overflow.
+    //  - Other stall reasons (no-tools-executed prose) → retry 2: cheap to retry
+    //    in the same tab once with the corrective nudge.
+    const lastResp = state.lastCoderResponse || "";
+    const prevWasEmpty = lastResp.includes("[EMPTY_RESPONSE]");
+    const prevWasTurnSkipped = lastResp.includes("TURN_SKIPPED");
+    const freshChatThreshold = prevWasEmpty || prevWasTurnSkipped ? 1 : 2;
     if (isStallRetry && retryCount >= freshChatThreshold && state.provider?.startNewChat) {
       log(colors.yellow(
         `  [Graph] -> Stall detected (retry ${retryCount}${prevWasEmpty ? ", prev empty-response" : ""}) — restarting browser session with fresh context`,

@@ -2373,43 +2373,49 @@ ${currentTask}${capWarning}`,
     f => f.endsWith('.css') && !prevSubtaskFiles.has(f)
   );
   if (cssFilesWritten.length > 0) {
-    // If JSX/TSX was also written in this same subtask, the coder authored both
-    // files and knows the class names — skip the consistency gate entirely.
-    const jsxAlsoWritten = (state.modifiedFiles || []).some(f => /\.(jsx|tsx)$/.test(f));
+    // The gate's purpose is to ensure CSS class names match whatever consumes
+    // them. For React projects the consumer is .jsx/.tsx; for vanilla projects
+    // it's .html. If the consumer was written or read this subtask, the coder
+    // already knows the class names.
+    const consumerWritten = (state.modifiedFiles || []).some(f =>
+      /\.(jsx|tsx|html?)$/.test(f),
+    );
 
-    // Check if the last coder response included reading a JSX/TSX file.
-    // This is the evidence that the coder actually verified class name consistency.
-    // Pattern: JSON tool call with "read_file" and a .jsx/.tsx path.
+    // Check if the last coder response included reading a consumer file
+    // (JSX/TSX/HTML). Pattern: JSON tool call with "read_file" + matching path.
     const lastResp = state.lastCoderResponse || "";
-    const readJsxEvidence = /"read_file"[^}]{1,200}\.(jsx|tsx)/.test(lastResp) ||
-      /read_file[^\n]{1,100}\.(jsx|tsx)/.test(lastResp);
+    const readConsumerEvidence =
+      /"read_file"[^}]{1,200}\.(jsx|tsx|html?)/.test(lastResp) ||
+      /read_file[^\n]{1,100}\.(jsx|tsx|html?)/.test(lastResp);
 
-    if (!readJsxEvidence && !jsxAlsoWritten) {
-      const jsxPaths = (state.modifiedFiles || []).filter(f => /\.(jsx|tsx)$/.test(f));
-      const jsxHint = jsxPaths.length > 0
-        ? `JSX files written this subtask: ${jsxPaths.join(", ")}`
-        : `Check the JSX/TSX component that imports ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
+    if (!readConsumerEvidence && !consumerWritten) {
+      const consumerPaths = (state.modifiedFiles || []).filter(f =>
+        /\.(jsx|tsx|html?)$/.test(f),
+      );
+      const consumerHint = consumerPaths.length > 0
+        ? `Consumer files written this subtask: ${consumerPaths.join(", ")}`
+        : `Check the JSX/TSX/HTML file that uses the class names in ${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}.`;
       const newCssRetry = (state.coderRetryCount ?? 0) + 1;
-      log(colors.yellow(`  [Graph] -> CSS written but no JSX read detected — requiring CSS/JSX class-name consistency verification.`));
+      log(colors.yellow(`  [Graph] -> CSS written but no JSX/HTML read detected — requiring class-name consistency verification.`));
       return {
         verifierFeedback: "FAIL",
         coderRetryCount: newCssRetry,
         messages: [{
           role: "user",
           content: `[VERIFIER CSS CONSISTENCY CHECK]
-You wrote a CSS file (${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}) but did not read the JSX component to verify class name consistency. Before this subtask can pass, you MUST verify that every CSS selector matches a className actually used in the JSX.
+You wrote a CSS file (${cssFilesWritten.map(f => f.split('/').pop()).join(", ")}) but did not read the consuming JSX/TSX/HTML file to verify class name consistency. Before this subtask can pass, you MUST verify that every CSS selector matches a class name actually used in the consumer.
 
 MANDATORY STEPS:
-1. Call read_file on the JSX component(s) that import this CSS.
-2. List every className string used in the JSX (e.g. className="board", className="square light-square selected-square").
-3. For each CSS class selector (.board, .square, .light-square, etc.) confirm it appears as a className in the JSX.
-4. CRITICAL: .square.light (compound selector) ≠ .light-square (single hyphenated class). JSX className="light-square" requires CSS .light-square { }, NOT .square.light { }.
-5. If ANY mismatch: fix the CSS selector (or JSX className) so they match exactly.
+1. Call read_file on the JSX/TSX/HTML file(s) that use this CSS.
+2. List every class name in the consumer (React: className="board"; HTML: class="board").
+3. For each CSS class selector (.board, .square, .light-square, etc.) confirm it appears as a class in the consumer.
+4. CRITICAL: .square.light (compound selector) ≠ .light-square (single hyphenated class). class="light-square" requires CSS .light-square { }, NOT .square.light { }.
+5. If ANY mismatch: fix the CSS selector (or consumer class) so they match exactly.
 6. Once verified and any fixes applied: output [] to complete.
 
-${jsxHint}
+${consumerHint}
 
-Do NOT output [] without reading the JSX first. The verifier checks your response for evidence of read_file on a .jsx or .tsx file.`,
+Do NOT output [] without reading the consumer first. The verifier checks your response for evidence of read_file on a .jsx, .tsx, or .html file.`,
         }],
       };
     }
