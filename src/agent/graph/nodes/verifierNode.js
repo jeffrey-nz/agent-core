@@ -2429,6 +2429,59 @@ Do NOT output [] without reading the consumer first. The verifier checks your re
     }
   }
 
+  // ── HTML inline-script + sibling JS API-shape consistency gate ──────────────
+  // When index.html (or similar) is written with inline <script> that calls
+  // methods on globals defined in a sibling .js file (via <script src="X.js">),
+  // the coder MUST have read the .js file to know the exact method signatures.
+  // Catches the chess-iter-3 failure: index.html's onclick passed {r, c} while
+  // game.js's isValidMove expected {row, col} — engine tests passed, UI broken.
+  //
+  // Only fires for vanilla projects (project has .html + .js but no .jsx/.tsx),
+  // and only when the .html is new to this subtask.
+  {
+    const writtenThisSubtask = (state.modifiedFiles || []).filter(
+      f => !prevSubtaskFiles.has(f),
+    );
+    const htmlWritten = writtenThisSubtask.filter(f => /\.html?$/i.test(f));
+    const hasReactFiles = (state.modifiedFiles || []).some(f => /\.(jsx|tsx)$/.test(f));
+    if (htmlWritten.length > 0 && !hasReactFiles) {
+      const allWritten = state.modifiedFiles || [];
+      const jsModules = allWritten.filter(f => /\.js$/i.test(f) && !f.endsWith('.test.js'));
+      const jsAlsoWrittenThisSubtask = writtenThisSubtask.some(
+        f => /\.js$/i.test(f) && !f.endsWith('.test.js'),
+      );
+      const lastResp = state.lastCoderResponse || "";
+      const readJsEvidence =
+        /"read_file"[^}]{1,200}\.js"?/.test(lastResp) ||
+        /read_file[^\n]{1,100}\.js\b/.test(lastResp);
+
+      if (jsModules.length > 0 && !jsAlsoWrittenThisSubtask && !readJsEvidence) {
+        const newRetry = (state.coderRetryCount ?? 0) + 1;
+        log(colors.yellow(
+          `  [Graph] -> HTML written but no sibling JS module read — requiring API-shape consistency verification.`,
+        ));
+        return {
+          verifierFeedback: "FAIL",
+          coderRetryCount: newRetry,
+          messages: [{
+            role: "user",
+            content: `[VERIFIER API-SHAPE CONSISTENCY CHECK]
+You wrote ${htmlWritten.join(", ")} with inline JavaScript, but did not read the sibling JS module(s) (${jsModules.join(", ")}) to verify the method signatures you call. Inline DOM glue that passes wrongly-shaped arguments (e.g. {r, c} when the callee expects {row, col}) silently throws "Cannot read properties of undefined" — engine unit tests pass, UI is dead.
+
+MANDATORY STEPS:
+1. Call read_file on ${jsModules.join(", ")} to see the exact parameter names of each method called from the inline script.
+2. For every method call in your inline <script> that targets that module's exports (e.g. game.move(...), game.isValidMove(...)), confirm the argument shapes EXACTLY match the parameter destructuring in the module.
+3. WATCH OUT for ES6 shorthand: \`{r, c}\` creates \`{r: r, c: c}\` — if the callee destructures \`{row, col}\`, this silently fails. Use \`{row: r, col: c}\` or rename the locals.
+4. If any mismatch: fix the call site (or the module signature) so they match exactly.
+5. Once verified and any fixes applied: output [] to complete.
+
+Do NOT output [] without reading the JS module first. The verifier checks your response for evidence of read_file on a .js file.`,
+          }],
+        };
+      }
+    }
+  }
+
   // TypeScript compilation gate: for React/TypeScript projects, run tsc --noEmit to
   // catch type errors in written .ts/.tsx files before accepting the subtask.
   // Mirrors the Swift swiftc -typecheck gate so TypeScript gets the same static analysis.
