@@ -802,6 +802,29 @@ The prompt already specifies the exact file, exact line, and exact change needed
       log(colors.cyan(`  [Graph] -> Project Manager: review-only plan accepted — task is a pure audit/verification (no implementation expected)`));
     }
 
+    // Truncation guard: if JSON truncation recovery had to close brackets AND
+    // the resulting plan only has 1 subtask, the model's output was cut off
+    // mid-list. Silently accepting yields a tiny scaffold-only plan that
+    // doesn't match the user's actual ask. Retry to get the full plan.
+    // (Observed in chess iter 10 with Grok: 1 subtask "create .gitignore +
+    // basic skeleton" survived a depth-3 truncation; reviewers approved a
+    // project with no chess code at all.)
+    if (truncationSuffix && candidateSubtasks.length <= 1 && attempt < MAX_PLAN_ATTEMPTS) {
+      lastAttemptError = new Error(
+        `Project Manager output was truncated and only ${candidateSubtasks.length} subtask survived recovery`,
+      );
+      log(colors.yellow(
+        `  [Graph] -> Project Manager attempt ${attempt}: plan truncated to ${candidateSubtasks.length} subtask(s) — retrying for a complete plan`,
+      ));
+      jsonErrorOverride =
+        `PREVIOUS PLAN WAS TRUNCATED — only ${candidateSubtasks.length} subtask(s) survived JSON recovery.\n\n` +
+        `Output a complete plan as a SINGLE valid JSON object. Keep each subtask short ` +
+        `(task <= 100 chars, implementation_note <= 300 chars) so the full plan fits in your response budget.\n\n` +
+        `The plan must cover ALL the work implied by the original task — typically 3-6 subtasks for a small project.\n\n` +
+        `Output ONLY the JSON object. No markdown, no prose.`;
+      continue;
+    }
+
     // Valid plan - accept it
     subtasks = candidateSubtasks;
     executionPlan = parsed.plan || planText;
