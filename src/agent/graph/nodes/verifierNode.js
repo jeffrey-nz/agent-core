@@ -1489,11 +1489,13 @@ ${currentTask}${capWarning}`,
       const response = state.lastCoderResponse || "";
       // For CLI acceptance tests, the criteria often specifies the exact
       // success string the test should print (e.g. `must print 'All tests passed'`).
-      // If the coder's response contains both the command invocation and that
-      // string, we have valid evidence — no need to also say "ACCEPTANCE TEST PASSED".
-      const printStringMatch =
-        (subtaskAcceptanceCriteria + " " + subtaskImplNote + " " + currentTask)
-          .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
+      // If the coder's response contains that string, we have valid evidence —
+      // no need to also say "ACCEPTANCE TEST PASSED". We use currentTask here
+      // because subtaskAcceptanceCriteria/subtaskImplNote aren't declared yet
+      // at this point — the structural-detection block declares them below.
+      // The user's prompt acceptance line typically ends up in currentTask.
+      const printStringMatch = currentTask
+        .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
       const expectedPrintString = printStringMatch?.[1];
       const hasPrintedEvidence = expectedPrintString
         ? new RegExp(expectedPrintString.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(response)
