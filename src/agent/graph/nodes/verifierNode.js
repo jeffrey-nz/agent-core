@@ -1487,15 +1487,18 @@ ${currentTask}${capWarning}`,
       // ── end Godot acceptance test ──
 
       const response = state.lastCoderResponse || "";
+      // Pull subtask metadata once at the top so all gates below can use it.
+      // (Used to be declared deep inside the structural-detection block.)
+      const subtaskAcceptanceCriteria = state.subtasks?.[state.currentSubtaskIndex]?.acceptanceCriteria || "";
+      const subtaskImplNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
+
       // For CLI acceptance tests, the criteria often specifies the exact
       // success string the test should print (e.g. `must print 'All tests passed'`).
       // If the coder's response contains that string, we have valid evidence —
-      // no need to also say "ACCEPTANCE TEST PASSED". We use currentTask here
-      // because subtaskAcceptanceCriteria/subtaskImplNote aren't declared yet
-      // at this point — the structural-detection block declares them below.
-      // The user's prompt acceptance line typically ends up in currentTask.
-      const printStringMatch = currentTask
-        .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
+      // no need to also say "ACCEPTANCE TEST PASSED".
+      const printStringMatch =
+        (subtaskAcceptanceCriteria + " " + subtaskImplNote + " " + currentTask)
+          .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
       const expectedPrintString = printStringMatch?.[1];
       const hasPrintedEvidence = expectedPrintString
         ? new RegExp(expectedPrintString.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(response)
@@ -1529,8 +1532,7 @@ ${currentTask}${capWarning}`,
       //
       // This prevents the infinite loop where the verifier demands http_request for
       // a CMS-admin test and the coder keeps trying to fetch an auth-protected URL.
-      const subtaskAcceptanceCriteria = state.subtasks?.[state.currentSubtaskIndex]?.acceptanceCriteria || "";
-      const subtaskImplNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
+      // (subtaskAcceptanceCriteria/subtaskImplNote pulled at the top of this block)
       const allCriteriaText = subtaskAcceptanceCriteria + " " + subtaskImplNote;
 
       // Structural if: criteria mention structural tools (or Unity/batchmode patterns)
