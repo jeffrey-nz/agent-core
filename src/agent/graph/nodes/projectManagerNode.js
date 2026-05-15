@@ -611,6 +611,8 @@ The prompt already specifies the exact file, exact line, and exact change needed
     }
 
     let parsed = null;
+    // Hoisted so the post-parse truncation guard below can read it without TDZ.
+    let truncationSuffix = "";
     try {
       const firstBrace = planText.indexOf("{");
       if (firstBrace === -1) throw new Error("No JSON object found in output");
@@ -619,7 +621,6 @@ The prompt already specifies the exact file, exact line, and exact change needed
       // lastIndexOf("}") is unreliable when the AI appends extra text with } characters
       // (e.g. PHP code examples like SilverStripe\Core\Extension { ... }) after the JSON block.
       let jsonEnd = -1;
-      let truncationSuffix = "";
       {
         const stack = [];
         let inString = false;
