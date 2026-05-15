@@ -1487,7 +1487,19 @@ ${currentTask}${capWarning}`,
       // ── end Godot acceptance test ──
 
       const response = state.lastCoderResponse || "";
-      const hasPassed = /ACCEPTANCE TEST PASSED/i.test(response);
+      // For CLI acceptance tests, the criteria often specifies the exact
+      // success string the test should print (e.g. `must print 'All tests passed'`).
+      // If the coder's response contains both the command invocation and that
+      // string, we have valid evidence — no need to also say "ACCEPTANCE TEST PASSED".
+      const printStringMatch =
+        (subtaskAcceptanceCriteria + " " + subtaskImplNote + " " + currentTask)
+          .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
+      const expectedPrintString = printStringMatch?.[1];
+      const hasPrintedEvidence = expectedPrintString
+        ? new RegExp(expectedPrintString.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(response)
+        : false;
+      const hasPassed =
+        /ACCEPTANCE TEST PASSED/i.test(response) || hasPrintedEvidence;
       const hasFailed = /ACCEPTANCE TEST FAILED/i.test(response);
       // Check both the text response AND the executed tool list.
       // The text-only check breaks when the coder uses a named-vhost URL like
@@ -2445,7 +2457,9 @@ Do NOT output [] without reading the consumer first. The verifier checks your re
     const htmlWritten = writtenThisSubtask.filter(f => /\.html?$/i.test(f));
     const hasReactFiles = (state.modifiedFiles || []).some(f => /\.(jsx|tsx)$/.test(f));
     if (htmlWritten.length > 0 && !hasReactFiles) {
-      const allWritten = state.modifiedFiles || [];
+      // Look at the cumulative set so we still see game.js written in subtask 1
+      // when HTML is written in subtask 3.
+      const allWritten = state.allModifiedFiles || [];
       const jsModules = allWritten.filter(f => /\.js$/i.test(f) && !f.endsWith('.test.js'));
       const jsAlsoWrittenThisSubtask = writtenThisSubtask.some(
         f => /\.js$/i.test(f) && !f.endsWith('.test.js'),
