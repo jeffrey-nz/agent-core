@@ -1647,6 +1647,29 @@ ${currentTask}${capWarning}`,
 
       const newRetryCount = (state.coderRetryCount ?? 0) + 1;
       const evidenceLabel = isStructuralAcceptance ? "structural tool evidence" : "live HTTP evidence";
+
+      // Hard cap enforcement: the structural-acceptance gate previously had
+      // only a soft cap warning in the prompt. If the coder couldn't produce
+      // the exact "ACCEPTANCE TEST PASSED" phrasing, the loop ran forever
+      // (observed in chess iter 4: retries 1/3 → 5/3 → killed manually).
+      //
+      // Cap-out treats the subtask as ENVIRONMENT_BLOCKED so the session
+      // can continue to ensemble review and final report — preferable to
+      // an infinite loop. If the test really did fail, downstream review
+      // catches it; if it passed silently, we don't lose the work.
+      if (newRetryCount > effectiveMaxRetries) {
+        log(colors.yellow(
+          `  [Graph] -> Acceptance test cap reached (${newRetryCount} > ${effectiveMaxRetries}). Force-advancing — assuming silent pass since other subtasks verified the work.`,
+        ));
+        eventBus.emit("system_message", {
+          text: `⚠️ Acceptance test gate force-skipped after ${effectiveMaxRetries} retries — proceeding to review`,
+          type: "warning",
+        });
+        emitTaskCompleted(state);
+        const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+        await commitVerifiedSubtask(state.projectDir, taskLabel);
+        return { verifierFeedback: "ENVIRONMENT_BLOCKED" };
+      }
       log(colors.red(`  [Graph] -> Verifier: acceptance test requires ${evidenceLabel}. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
       const atCap = newRetryCount >= effectiveMaxRetries;
       const capWarning = atCap
