@@ -1560,6 +1560,70 @@ ${currentTask}${capWarning}`,
       );
       const hasStructuralEvidence = isStructuralAcceptance && calledStructuralTool;
 
+      // ── Auto-run CLI acceptance tests ─────────────────────────────────────────
+      // When criteria specify `node <file>.js must print '<text>'`, run the test
+      // directly rather than relying on model self-report. This prevents the model
+      // from hallucinating "ACCEPTANCE TEST PASSED" when the test file has syntax
+      // errors or logic bugs (root cause: chess session where game.js had 3 syntax
+      // errors but the model self-reported "All tests passed" without running it).
+      if (isCliAcceptance && expectedPrintString && projectDir) {
+        // Extract the test command from all criteria text or the task description
+        const searchText = allCriteriaText + " " + currentTask + " " + initialPromptText;
+        const nodeTestMatch = searchText.match(/\bnode\s+(\S+\.m?js)\b/i);
+        if (nodeTestMatch) {
+          const testFile = nodeTestMatch[1];
+          const testCmd = `node ${testFile}`;
+          log(colors.dim(`  [Verifier] Auto-running CLI test: ${testCmd}`));
+          const cliResult = await execAsync(testCmd, { cwd: projectDir, timeout: 30000 });
+          const combined = cliResult.stdout + cliResult.stderr;
+
+          if (cliResult.status === 0 &&
+              new RegExp(expectedPrintString.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(combined)) {
+            log(colors.green(`  [Graph] -> Verifier: CLI auto-run passed — "${expectedPrintString}" found in output.`));
+            eventBus.emit("system_message", {
+              text: `✓ Acceptance test passed (auto-run): ${currentTask.slice(0, 80)}`,
+              type: "info",
+            });
+            emitTaskCompleted(state);
+            const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+            await commitVerifiedSubtask(state.projectDir, taskLabel);
+            await closeSubIssueForSubtask(state);
+            writeVerificationMarker();
+            return { verifierFeedback: "PASS" };
+          } else {
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            const failReason = cliResult.status !== 0
+              ? `exited with code ${cliResult.status}`
+              : `output did not contain "${expectedPrintString}"`;
+            log(colors.red(
+              `  [Graph] -> Verifier: CLI auto-run FAILED — ${failReason}. Retry ${newRetryCount}/${effectiveMaxRetries}.`,
+            ));
+            eventBus.emit("system_message", {
+              text: `✗ Acceptance test failed (auto-run): ${failReason}`,
+              type: "warning",
+            });
+            if (newRetryCount > effectiveMaxRetries) {
+              emitTaskCompleted(state);
+              const taskLabel2 = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+              await commitVerifiedSubtask(state.projectDir, taskLabel2);
+              return { verifierFeedback: "ENVIRONMENT_BLOCKED" };
+            }
+            const outputSnippet = combined.trim().slice(0, 2000) || "(no output)";
+            const failureGuide = cliResult.status !== 0
+              ? `The command exited with code ${cliResult.status}. Fix the error, then the verifier will re-run automatically.`
+              : `The command ran successfully but did not print "${expectedPrintString}". Fix the logic, then the verifier will re-run automatically.`;
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTO-RUN]\n\nCommand: ${testCmd}\nExpected output to contain: "${expectedPrintString}"\n\nActual output (exit ${cliResult.status}):\n\`\`\`\n${outputSnippet}\n\`\`\`\n\n${failureGuide}\n\nCURRENT SUBTASK:\n${currentTask}`,
+              }],
+            };
+          }
+        }
+      }
+
       // Infrastructure error detection: check the most recent <http_result> block
       // for server-side environment failures (permission denied, disk full, etc.).
       // These cannot be fixed by editing code — the verifier provides a shell fix command.
@@ -2478,8 +2542,10 @@ MANDATORY STEPS:
 2. List every class name in the consumer (React: className="board"; HTML: class="board").
 3. For each CSS class selector (.board, .square, .light-square, etc.) confirm it appears as a class in the consumer.
 4. CRITICAL: .square.light (compound selector) ≠ .light-square (single hyphenated class). class="light-square" requires CSS .light-square { }, NOT .square.light { }.
-5. If ANY mismatch: fix the CSS selector (or consumer class) so they match exactly.
-6. Once verified and any fixes applied: output [] to complete.
+5. For each CSS ID selector (#game, #header, #play-area, etc.) confirm an element with that exact id attribute exists in the HTML. A common mistake: CSS says #header but HTML has id="game-header" — these do NOT match.
+6. For container elements that hold piles/cards/items side-by-side, confirm the container has display:flex in the CSS. Missing flex on a container causes its children to stack vertically instead of horizontally.
+7. If ANY mismatch: fix the CSS selector (or HTML id) so they match exactly.
+8. Once verified and any fixes applied: output [] to complete.
 
 ${consumerHint}
 
@@ -2540,6 +2606,103 @@ MANDATORY STEPS:
 Do NOT output [] without reading the JS module first. The verifier checks your response for evidence of read_file on a .js file.`,
           }],
         };
+      }
+    }
+  }
+
+  // Vanilla HTML headless render gate: for plain HTML+CSS+JS projects (no build step,
+  // no React), launch a headless browser, load index.html, and verify that every
+  // document.getElementById("X") call in the project's JS resolves to an actual element.
+  // Catches HTML-JS id mismatches (e.g. JS expects id="new-game" but HTML has
+  // id="new-game-button") that static analysis may miss.
+  {
+    const projectDir = state.projectDir || "";
+    const allFiles = state.allModifiedFiles || [];
+    const hasHtml = allFiles.some(f => /\.html?$/i.test(f));
+    const hasJs = allFiles.some(f => /\.m?js$/i.test(f));
+    const hasReact = allFiles.some(f => /\.(jsx|tsx)$/.test(f));
+    const hasPkg = await fs.promises.access(path.join(projectDir, "package.json"))
+      .then(() => true).catch(() => false);
+
+    if (hasHtml && hasJs && !hasReact && !hasPkg && projectDir) {
+      // Find the main HTML entry point
+      const htmlCandidates = allFiles
+        .filter(f => /\.html?$/i.test(f))
+        .map(f => path.isAbsolute(f) ? f : path.join(projectDir, f));
+      const indexHtml =
+        htmlCandidates.find(f => /index\.html?$/i.test(f)) || htmlCandidates[0];
+
+      if (indexHtml) {
+        const htmlExists = await fs.promises.access(indexHtml).then(() => true).catch(() => false);
+        if (htmlExists) {
+          // Collect all getElementById("X") literal IDs from JS files
+          const jsFiles = allFiles.filter(f => /\.m?js$/i.test(f) && !f.includes("node_modules"));
+          const referencedIds = new Set();
+          for (const relPath of jsFiles) {
+            const absPath = path.isAbsolute(relPath) ? relPath : path.join(projectDir, relPath);
+            try {
+              const src = await fs.promises.readFile(absPath, "utf8");
+              const re = /getElementById\(\s*["']([^"']+)["']\s*\)/g;
+              let m;
+              while ((m = re.exec(src)) !== null) referencedIds.add(m[1]);
+            } catch { /* skip */ }
+          }
+
+          if (referencedIds.size > 0) {
+            try {
+              const { chromium } = await import("playwright-core");
+              const browser = await chromium.launch({ headless: true });
+              const page = await browser.newPage();
+              const consoleErrors = [];
+              page.on("console", msg => {
+                if (msg.type() === "error") consoleErrors.push(msg.text());
+              });
+              page.on("pageerror", err => consoleErrors.push(err.message));
+
+              await page.goto(`file://${indexHtml}`, { timeout: 6000 }).catch(() => {});
+              await page.waitForTimeout(500);
+
+              const missingIds = [];
+              for (const id of referencedIds) {
+                const el = await page.$(`#${id}`).catch(() => null);
+                if (!el) missingIds.push(id);
+              }
+              await browser.close();
+
+              if (missingIds.length > 0 || consoleErrors.length > 0) {
+                const missingDesc = missingIds.length > 0
+                  ? `\nMissing HTML elements (getElementById returns null):\n${missingIds.map(id => `  • id="${id}"`).join("\n")}`
+                  : "";
+                const errDesc = consoleErrors.length > 0
+                  ? `\nBrowser console errors:\n${consoleErrors.slice(0, 5).map(e => `  • ${e}`).join("\n")}`
+                  : "";
+                const newRetry = (state.coderRetryCount ?? 0) + 1;
+                log(colors.yellow(
+                  `  [Verifier] Headless render: ${missingIds.length} missing id(s), ${consoleErrors.length} console error(s)`,
+                ));
+                return {
+                  verifierFeedback: "FAIL",
+                  coderRetryCount: newRetry,
+                  messages: [{
+                    role: "user",
+                    content: `[VERIFIER HEADLESS RENDER CHECK]
+The page was loaded in a headless browser. The following problems were found:
+${missingDesc}${errDesc}
+
+For each missing id: the JavaScript calls \`document.getElementById("X")\` but no HTML element has \`id="X"\`. Fix by either:
+- Adding \`id="X"\` to the correct HTML element in index.html, OR
+- Changing the JavaScript to match the id that already exists in the HTML.
+
+Fix ALL missing ids before this subtask can pass.`,
+                  }],
+                };
+              }
+              log(colors.dim("  [Verifier] Headless render: all getElementById IDs resolve ✓"));
+            } catch (e) {
+              log(colors.dim(`  [Verifier] Headless render check skipped: ${e.message?.slice(0, 80)}`));
+            }
+          }
+        }
       }
     }
   }

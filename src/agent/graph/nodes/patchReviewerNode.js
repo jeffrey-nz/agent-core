@@ -40,7 +40,25 @@
  *      JSON.stringify(departmentValues) — departmentValues was already an array of strings.
  *      → If double-encoding pattern found: FAIL with line number and fix instructions
  *
- *   5. IMPLEMENTATION NOTE MISMATCH (delete/remove instructions not followed)
+ *   5. JAVASCRIPT SYNTAX CHECK (.js, .mjs, .cjs)
+ *      Runs `node --check <file>` on modified JS files. Catches syntax errors that Node.js
+ *      would throw at require/import time: unclosed block comments, invalid expressions like
+ *      `2dir` instead of `2*dir`, missing template literal backticks, etc.
+ *      → If node --check exits non-zero: FAIL with the exact error message
+ *
+ *   6. IMPLEMENTATION NOTE MISMATCH (delete/remove instructions not followed)
+ *
+ *   7. CROSS-FILE HTML-JS ID CONSISTENCY (.js, .ts, .jsx, .tsx, .cjs)
+ *      Scans all HTML files in the project for id="X" attributes, then checks
+ *      that every document.getElementById("X") call in modified JS files
+ *      references an ID that actually exists in the HTML.
+ *      → If JS references an ID not found in any HTML file: FAIL
+ *
+ *   8. CROSS-FILE HTML-CSS ID CONSISTENCY (.css)
+ *      Same HTML scan, applied to CSS #id selectors. Catches selectors like
+ *      #game-root when the HTML element is id="game", or #header when HTML
+ *      has id="game-header".
+ *      → If CSS targets an ID not found in any HTML file: FAIL
  *      If the subtask's implementation_note says "DELETE", "REMOVE", or "must be deleted"
  *      for a specific line, reads the target file and checks if that pattern still exists.
  *      → If the old pattern is still present: FAIL with exact line reference
@@ -59,6 +77,7 @@ import { colors } from "#app/ui/colors.js";
 import { eventBus } from "#web/eventBus.js";
 import { personaMeta } from "../personas.js";
 import { MAX_VERIFIER_RETRIES } from "#config/pipeline.js";
+import { execAsync } from "#utils/exec.js";
 
 const PERSONA = personaMeta("patchReviewer");
 
@@ -265,6 +284,128 @@ function extractDeletionRequirements(implementationNote) {
     .filter((p) => p.length >= 4); // ignore trivially short patterns
 }
 
+// ── Cross-file ID consistency check ──────────────────────────────────────────
+
+/**
+ * Collect all id="X" attribute values from every HTML file in the project.
+ * Returns a Set of string IDs.
+ */
+async function collectHtmlIds(projectDir) {
+  const ids = new Set();
+  let htmlFiles = [];
+  try {
+    const walk = async (dir) => {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.name.startsWith(".") || e.name === "node_modules") continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (/\.html?$/i.test(e.name)) htmlFiles.push(full);
+      }
+    };
+    await walk(projectDir);
+  } catch { /* non-fatal */ }
+
+  for (const f of htmlFiles) {
+    try {
+      const src = await fs.readFile(f, "utf8");
+      const re = /\bid\s*=\s*["']([^"']+)["']/gi;
+      let m;
+      while ((m = re.exec(src)) !== null) ids.add(m[1].trim());
+    } catch { /* skip unreadable */ }
+  }
+  return ids;
+}
+
+/**
+ * Check a JS file for document.getElementById("X") calls whose ID is not
+ * present in any HTML file in the project. Handles simple string literals;
+ * skips dynamic/computed IDs (e.g. "tableau-" + i → prefix "tableau-" is
+ * matched against any HTML id that starts with that prefix).
+ *
+ * Returns an array of issue objects.
+ */
+function analyzeJsIdRefs(content, filename, htmlIds) {
+  if (htmlIds.size === 0) return []; // no HTML to compare against
+  const issues = [];
+
+  // Match: getElementById("literal") or getElementById('literal')
+  const literalRe = /getElementById\(\s*["']([^"']+)["']\s*\)/g;
+  let m;
+  while ((m = literalRe.exec(content)) !== null) {
+    const id = m[1];
+    if (!htmlIds.has(id)) {
+      const lineNo = content.slice(0, m.index).split("\n").length;
+      issues.push({
+        type: "JS_MISSING_HTML_ID",
+        description:
+          `Line ${lineNo}: \`getElementById("${id}")\` — but no HTML element has \`id="${id}"\`.\n` +
+          `Either add \`id="${id}"\` to the correct HTML element, or fix the ID string to match the HTML.\n` +
+          `HTML ids found: ${[...htmlIds].join(", ")}`,
+      });
+    }
+  }
+
+  // Match: getElementById("prefix-" + expr) — check that at least one HTML id
+  // exists with that prefix followed by a digit (e.g. "tableau-0", "foundation-0").
+  // Ignores non-numeric suffixes like "foundation-spades" which is a different
+  // naming scheme and would cause a false negative if allowed to match.
+  const prefixRe = /getElementById\(\s*["']([^"']+)['"]\s*\+/g;
+  while ((m = prefixRe.exec(content)) !== null) {
+    const prefix = m[1];
+    const anyNumericMatch = [...htmlIds].some(id => {
+      if (!id.startsWith(prefix)) return false;
+      const rest = id.slice(prefix.length);
+      return /^\d/.test(rest); // expect numeric suffix (e.g. "tableau-0")
+    });
+    if (!anyNumericMatch) {
+      const lineNo = content.slice(0, m.index).split("\n").length;
+      const similar = [...htmlIds].filter(id => id.startsWith(prefix.split("-")[0]));
+      const hint = similar.length
+        ? `\nHTML ids with similar prefix: ${similar.join(", ")}`
+        : `\nHTML ids found: ${[...htmlIds].join(", ")}`;
+      issues.push({
+        type: "JS_MISSING_HTML_ID_PREFIX",
+        description:
+          `Line ${lineNo}: \`getElementById("${prefix}" + ...)\` — but no HTML element has an id like "${prefix}0", "${prefix}1", etc.\n` +
+          `Either add elements with numeric ids like \`id="${prefix}0"\`, \`id="${prefix}1"\`, or fix the prefix string.` +
+          hint,
+      });
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * Check a CSS file for #id selectors whose ID is not present in any HTML
+ * file. Returns an array of issue objects.
+ */
+function analyzeCssIdRefs(content, filename, htmlIds) {
+  if (htmlIds.size === 0) return [];
+  const issues = [];
+
+  // Match top-level #id selectors (not inside strings or url() calls)
+  // Simple heuristic: lines starting with or containing #word { or #word,
+  const re = /(?:^|[,\s{])#([\w-]+)\s*[{,>~+\s]/gm;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const id = m[1];
+    if (!htmlIds.has(id)) {
+      const lineNo = content.slice(0, m.index).split("\n").length;
+      issues.push({
+        type: "CSS_MISSING_HTML_ID",
+        description:
+          `Line ${lineNo}: CSS selector \`#${id}\` — but no HTML element has \`id="${id}"\`.\n` +
+          `Either add \`id="${id}"\` to the correct HTML element, or rename the selector to match the HTML.\n` +
+          `HTML ids found: ${[...htmlIds].join(", ")}`,
+      });
+    }
+  }
+
+  return issues;
+}
+
 // ── Main node ─────────────────────────────────────────────────────────────────
 
 export async function patchReviewerNode(state) {
@@ -310,6 +451,9 @@ export async function patchReviewerNode(state) {
   const projectDir = state.projectDir || "";
   const implementationNote = currentSubtask?.implementationNote || currentSubtask?.implementation_note || "";
   const deletionRequirements = extractDeletionRequirements(implementationNote);
+
+  // Clear per-subtask HTML ID cache so a fresh HTML scan happens each time
+  globalThis.__patchReviewHtmlIds = null;
 
   const allIssues = [];
 
@@ -361,7 +505,55 @@ export async function patchReviewerNode(state) {
       }
     }
 
-    // 5. Implementation note deletion check
+    // 5. JavaScript syntax check — run `node --check` on plain JS files
+    // Catches parse-time errors (unclosed comments, invalid expressions, missing
+    // backticks in template literals) that no regex heuristic can reliably find.
+    if (/\.(m?js|cjs)$/i.test(ext) && !relPath.includes("node_modules")) {
+      const syntaxResult = await execAsync(`node --check ${JSON.stringify(absPath)}`);
+      if (syntaxResult.status !== 0) {
+        const errText = (syntaxResult.stderr || syntaxResult.stdout || "").trim();
+        allIssues.push({
+          file: relPath,
+          type: "JS_SYNTAX_ERROR",
+          description:
+            `JavaScript syntax error detected by \`node --check\`:\n\n${errText}\n\n` +
+            `Fix the syntax error(s) above using patch_file or write_file before this subtask can pass.`,
+        });
+      }
+    }
+
+    // 7. Cross-file HTML-JS ID consistency — catch getElementById("X") calls
+    //    where no HTML element in the project has id="X".
+    //    Loaded lazily so the HTML walk only runs once per patchReviewer pass.
+    if (/\.(m?js|cjs|jsx|tsx|ts)$/i.test(ext)) {
+      if (!globalThis.__patchReviewHtmlIds) {
+        globalThis.__patchReviewHtmlIds = await collectHtmlIds(projectDir);
+      }
+      const htmlIds = globalThis.__patchReviewHtmlIds;
+      if (htmlIds.size > 0) {
+        const idIssues = analyzeJsIdRefs(content, filename, htmlIds);
+        for (const issue of idIssues) {
+          allIssues.push({ file: relPath, ...issue });
+        }
+      }
+    }
+
+    // 8. Cross-file HTML-CSS ID consistency — catch #id selectors in CSS
+    //    where no HTML element in the project has that id.
+    if (/\.css$/i.test(ext)) {
+      if (!globalThis.__patchReviewHtmlIds) {
+        globalThis.__patchReviewHtmlIds = await collectHtmlIds(projectDir);
+      }
+      const htmlIds = globalThis.__patchReviewHtmlIds;
+      if (htmlIds.size > 0) {
+        const cssIdIssues = analyzeCssIdRefs(content, filename, htmlIds);
+        for (const issue of cssIdIssues) {
+          allIssues.push({ file: relPath, ...issue });
+        }
+      }
+    }
+
+    // 6. Implementation note deletion check
     if (deletionRequirements.length > 0) {
       for (const pattern of deletionRequirements) {
         // Escape the pattern for use as a simple string search
