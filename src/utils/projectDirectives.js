@@ -565,6 +565,13 @@ REACT / WEB UI QUALITY STANDARDS (apply to all React, Vue, and web app tasks):
   4. NEVER create a new CSS file during a retry if ANY css file already exists for this component. Creating Chess.css, ChessGame.css, ChessGame.styles.css, and ChessBoard.css across retries is a pipeline failure — pick one file and fix it in place.
   5. Orphaned CSS files (not imported by any JSX) are dead code. Delete them rather than leaving them.
 - NO-OP SUBTASK SELF-CHECK: If a subtask says "run tests and verify" or "run the build" but does NOT require writing files, output [] immediately after running the tools and confirming success. Do NOT write stub files, placeholder files, or package.json markers to satisfy a "must write a file" requirement. The verifier accepts execution-only subtasks (files:[] in the plan) when an execution tool is called.
+- API SHAPE CONSISTENCY (CRITICAL for UI/glue code calling separate modules): When writing JavaScript that calls into another file's exported functions (e.g. a DOM click handler calling game.move(...)), you MUST pass arguments with the exact property names the callee expects. Read the callee's signature/usage in its source file BEFORE writing the call site — do NOT guess the shape.
+  Common failure: callee defines isValidMove({row, col}) but caller passes {r, c} via ES6 shorthand. Result: callee reads undefined.row, crashes silently, UI looks frozen. The unit tests still pass because they exercise the engine directly, never the UI glue.
+  Mandatory steps when writing inline scripts in HTML, or DOM event handlers that invoke a separate module:
+  1. read_file the callee module first to confirm parameter property names (e.g. {row, col} not {r, c}; {from, to} not just (from, to)).
+  2. Mirror those names exactly in the caller — do not abbreviate via shorthand syntax in a way that changes the keys.
+  3. If you must use shorthand, name the local variables to match: const row = r, col = c; then pass {row, col}.
+  4. Manually trace one invocation in your head: "callee receives to.row = ?". If it reads undefined, the call is broken.
 `;
 
 const SILVERSTRIPE_CODER_DIRECTIVE = `

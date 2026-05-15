@@ -1522,8 +1522,16 @@ ${currentTask}${capWarning}`,
       // Structural if: criteria mention structural tools (or Unity/batchmode patterns)
       // AND there is no URL to fetch. Unity acceptance tests describe batchmode XML
       // parsing without necessarily using the keyword "execute_bash" in the criteria.
+      //
+      // Also covers CLI/Node acceptance tests: criteria mentioning `node <file>.js`,
+      // `npm test`, `node test`, or "print 'X'" patterns indicate a shell-runnable
+      // test, verified by execute_bash output rather than HTTP fetches.
+      const isCliAcceptance =
+        /\b(node\s+\S+\.(?:m?js)|npm\s+(?:test|run\s+\S+)|node\s+--test|pnpm\s+test|yarn\s+test|pytest|cargo\s+test|go\s+test)\b/i.test(allCriteriaText) ||
+        /must\s+print\s+["'`]/i.test(allCriteriaText);
       const isStructuralAcceptance =
-        /\b(grep|read_file|execute_bash|find_file|db[:\-]build|sake|run_sake|batchmode|editmode[_\s]results|unity.*test)\b/i.test(allCriteriaText) &&
+        (/\b(grep|read_file|execute_bash|find_file|db[:\-]build|sake|run_sake|batchmode|editmode[_\s]results|unity.*test)\b/i.test(allCriteriaText) ||
+          isCliAcceptance) &&
         !/https?:\/\/|http_request\s*\(/.test(subtaskImplNote);
 
       const calledStructuralTool = (state.lastToolsExecuted || []).some(
