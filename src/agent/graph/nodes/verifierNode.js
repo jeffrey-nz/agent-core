@@ -2427,10 +2427,15 @@ ${currentTask}${capWarning}`,
   if (cssFilesWritten.length > 0) {
     // The gate's purpose is to ensure CSS class names match whatever consumes
     // them. For React projects the consumer is .jsx/.tsx; for vanilla projects
-    // it's .html. If the consumer was written or read this subtask, the coder
-    // already knows the class names.
+    // it's .html. If the consumer was written or read this subtask, OR a
+    // consumer already exists from a prior subtask (so the coder's session
+    // context includes it), the coder already has visibility into the class
+    // names.
     const consumerWritten = (state.modifiedFiles || []).some(f =>
       /\.(jsx|tsx|html?)$/.test(f),
+    );
+    const consumerExistsFromPriorSubtask = (state.allModifiedFiles || []).some(
+      f => /\.(jsx|tsx|html?)$/.test(f) && !(state.modifiedFiles || []).includes(f),
     );
 
     // Check if the last coder response included reading a consumer file
@@ -2440,7 +2445,18 @@ ${currentTask}${capWarning}`,
       /"read_file"[^}]{1,200}\.(jsx|tsx|html?)/.test(lastResp) ||
       /read_file[^\n]{1,100}\.(jsx|tsx|html?)/.test(lastResp);
 
-    if (!readConsumerEvidence && !consumerWritten) {
+    // Cap retries on this gate at 1 — if the coder still hasn't read the
+    // consumer after one nudge, we accept the CSS as-is and let downstream
+    // reviewers/users catch any actual mismatch. Better than spending all
+    // 5 retries inside this one gate.
+    const cssGateRetries = state.coderRetryCount ?? 0;
+
+    if (
+      !readConsumerEvidence &&
+      !consumerWritten &&
+      !consumerExistsFromPriorSubtask &&
+      cssGateRetries < 1
+    ) {
       const consumerPaths = (state.modifiedFiles || []).filter(f =>
         /\.(jsx|tsx|html?)$/.test(f),
       );
