@@ -1492,12 +1492,17 @@ ${currentTask}${capWarning}`,
       const subtaskAcceptanceCriteria = state.subtasks?.[state.currentSubtaskIndex]?.acceptanceCriteria || "";
       const subtaskImplNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
 
-      // For CLI acceptance tests, the criteria often specifies the exact
-      // success string the test should print (e.g. `must print 'All tests passed'`).
-      // If the coder's response contains that string, we have valid evidence —
-      // no need to also say "ACCEPTANCE TEST PASSED".
+      // For CLI acceptance tests, the criteria (or the original user prompt)
+      // often specifies the exact success string the test should print
+      // (e.g. `must print 'All tests passed'`). If the coder's response
+      // contains that string, we have valid evidence — no need to also say
+      // "ACCEPTANCE TEST PASSED". Check both the subtask metadata AND the
+      // original user prompt, since the projectManager often paraphrases the
+      // criteria when generating subtasks and the exact string is lost from
+      // subtaskAcceptanceCriteria.
+      const initialPromptText = state.initialPrompt || "";
       const printStringMatch =
-        (subtaskAcceptanceCriteria + " " + subtaskImplNote + " " + currentTask)
+        (subtaskAcceptanceCriteria + " " + subtaskImplNote + " " + currentTask + " " + initialPromptText)
           .match(/must\s+print\s+["'`]([^"'`]+)["'`]/i);
       const expectedPrintString = printStringMatch?.[1];
       const hasPrintedEvidence = expectedPrintString
