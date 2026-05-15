@@ -7,6 +7,8 @@ import { colors } from "#app/ui/colors.js";
 import { gitResetHard } from "#utils/gitReset.js";
 import { personaMeta } from "../personas.js";
 import { loadProceduralKnowledge } from "#utils/contextLoader.js";
+import { renderMemorySnapshot } from "#memory/loader.js";
+import { shouldCompact, compactMessages } from "#memory/compactor.js";
 import { classifyEnvironmentError } from "#agent/utils/executionOutputAnalysis.js";
 import { MAX_STEPS_CODER, MAX_STEPS_CODER_UNITY } from "#config/pipeline.js";
 import { buildCoderDirective, getCoderMaxSteps, buildAcceptanceTestDirective, GODOT_BIN_PATH } from "#utils/projectDirectives.js";
@@ -865,8 +867,22 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
     ? `\n[SCOPE DOCUMENT — truncated for stall retry; use read_file for full details]\n${_strippedScope.slice(0, 2000)}\n...[scope truncated — use read_file if more detail is needed]\n`
     : scopeSection;
 
+  // Memory bank — load durable user/feedback/project/reference notes
+  // from ~/.agent-core/memory/ and any project-scope docs/memory-bank/.
+  // Non-fatal on read errors; empty string if no memories exist.
+  let memorySection = "";
+  try {
+    const snapshot = await renderMemorySnapshot({
+      projectDir: state.projectDir,
+      maxChars: 4000,
+    });
+    if (snapshot) memorySection = `\n${snapshot}\n`;
+  } catch (memErr) {
+    log(colors.dim(`  [Memory] Skipped memory injection: ${memErr.message}`));
+  }
+
   const systemPrompt = `You are an expert Software Engineer.
-Your job is ONLY to implement the current assigned SUBTASK.
+${memorySection}Your job is ONLY to implement the current assigned SUBTASK.
 ${constraintsSection}${newProjectSection}
 [OVERALL EXECUTION PLAN]
 ${state.executionPlan}
@@ -919,6 +935,23 @@ ${buildAcceptanceTestDirective(state.projectType)}
         ...allMessages.slice(-TAIL_SIZE),
       ];
     }
+  }
+
+  // Message-level compaction (Claude-style): if the windowed messages still
+  // exceed the soft cap, collapse the oldest middle slice into a synthetic
+  // summary message. Preserves the first message (task) and a recent tail
+  // verbatim. Runs BEFORE the per-message content pruning below.
+  if (shouldCompact(windowedMessages, { softCapChars: 60_000, minMessages: 10 })) {
+    const before = windowedMessages.length;
+    windowedMessages = await compactMessages(windowedMessages, {
+      keepHead: 1,
+      keepTail: 8,
+    });
+    log(
+      colors.dim(
+        `  [Memory] Compacted ${before - windowedMessages.length} older message(s) — total now ${windowedMessages.length}`,
+      ),
+    );
   }
 
   // Semantic context compaction: compress large tool-result blocks before the tail

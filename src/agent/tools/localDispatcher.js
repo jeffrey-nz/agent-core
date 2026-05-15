@@ -11,6 +11,7 @@ import { executePhpTool } from "./php/executor.js";
 import { executeDiagnosticsTool } from "./diagnostics/executor.js";
 import { executeGitTool } from "./git.js";
 import { executeGithubTool } from "./github/executor.js";
+import { executeMemoryTool } from "./memory.js";
 
 const FILESYSTEM_TOOLS = new Set([
   "read_file",
@@ -54,6 +55,8 @@ const GITHUB_TOOLS = new Set([
   "github_move_card",
   "github_trigger_workflow",
 ]);
+
+const MEMORY_TOOLS = new Set(["memory_save", "memory_list", "memory_delete"]);
 
 // Tools that mutate state - blocked when context.readOnly is true.
 const WRITE_TOOLS = new Set([
@@ -115,6 +118,8 @@ export async function dispatchTool(name, args, context) {
     executor = () => executeGitTool(name, args, context);
   } else if (GITHUB_TOOLS.has(name)) {
     executor = () => executeGithubTool(name, args, context);
+  } else if (MEMORY_TOOLS.has(name)) {
+    executor = () => executeMemoryTool(name, args, context);
   } else {
     return { ok: false, error: `Unknown tool: ${name}`, text: `[ERROR] Unknown tool: ${name}` };
   }

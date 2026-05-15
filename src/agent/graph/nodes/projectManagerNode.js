@@ -2,6 +2,7 @@ import { generateText } from "ai";
 import { jsonrepair } from "jsonrepair";
 import { detectProjectContext } from "#utils/detectProjectContext.js";
 import { buildTddDirective } from "#utils/projectDirectives.js";
+import { renderMemoryIndex } from "#memory/loader.js";
 import { setDashboardState } from "#app/ui/dashboard.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
@@ -286,9 +287,18 @@ export async function projectManagerNode(state, config) {
           .join("\n")}\nDo NOT re-create these subtasks. Generate only the remaining work.\n`
       : "";
 
+  // Memory bank — surface the user's durable preferences and project facts
+  // so the planner doesn't propose work that conflicts with them.
+  // Only the index is rendered here (no bodies) to keep PM prompts small.
+  let memoryIndexSection = "";
+  try {
+    const idx = await renderMemoryIndex({ projectDir: state.projectDir });
+    if (idx) memoryIndexSection = `\n${idx}\n`;
+  } catch {}
+
   let systemPrompt = `You are a Lead Project Manager and Engineering Planner.
 ${tddSection}
-
+${memoryIndexSection}
 ${projectConstraints}
 
 You have been given:
