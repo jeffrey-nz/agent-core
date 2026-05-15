@@ -89,6 +89,35 @@ Key state on `automationState`:
   when the browser session rotates (context-limit hit). See
   [src/providers/factory/rotation.js](./src/providers/factory/rotation.js).
 
+## Memory bank (Claude-style)
+
+[src/memory/](./src/memory/) implements a persistent, Claude-compatible
+memory store the agent can read and write across sessions.
+
+- **bank.js** — read/write Claude-format files (`name` + `description` +
+  `metadata.type` frontmatter, markdown body). Types: `user | feedback |
+  project | reference`.
+- **loader.js** — `renderMemorySnapshot()` returns a system-prompt-ready
+  block. `renderMemoryIndex()` is a lighter form (names only).
+- **compactor.js** — `compactMessages()` collapses oldest middle messages
+  when `state.messages` exceeds a soft cap, preserving head + tail.
+
+Two storage scopes (both searched; project wins on duplicate name):
+- Global: `~/.agent-core/memory/` — per-user, cross-project
+- Project: `<projectDir>/docs/memory-bank/` — committed to git
+
+The coder prompt auto-injects the full snapshot;  projectManager injects
+only the index (PM prompts are tight on space). The agent can call three
+new tools to persist findings autonomously:
+- `memory_save({ name, description, type, body, scope? })`
+- `memory_list()`
+- `memory_delete({ name, scope? })`
+
+`coderNode` also runs message-level compaction before its existing
+per-message content pruning — when the windowed message set passes 60k
+chars, the oldest middle slice gets replaced with a synthetic
+`## Conversation summary` user message.
+
 ## Common pitfalls
 
 - **Adding a new event** for the UI? Make sure dev-agent's
@@ -104,8 +133,13 @@ Key state on `automationState`:
 
 ## Tests
 
-There aren't any yet. Adding `node --test`-based tests under `tests/` is a
-fine next step; mirror the layout used by browser-ai-bridge.
+`tests/` uses `node --test`. Current coverage:
+- `cssConsistencyGate.test.js` — verifier's CSS/HTML consumer detection regex
+- `memory.test.js` — memory bank (frontmatter, list/write/delete, MEMORY.md
+  index), loader (snapshot + index rendering), compactor (head/tail
+  preservation), and the memory tool dispatcher path
+
+Run via `npm test`. CI runs them on every push (see `.github/workflows/ci.yml`).
 
 ## Modern AI theory applied (reference)
 
