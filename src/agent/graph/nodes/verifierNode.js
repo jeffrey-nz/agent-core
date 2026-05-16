@@ -490,6 +490,15 @@ async function _verifierImpl(state) {
   // modifiedFiles list is stale (accumulated from prior subtasks). Always fail
   // here rather than letting stale files produce a false PASS.
   if (state.coderFailed) {
+    // Actually perform the git reset we promise in the message below. Without this,
+    // accumulated working-tree changes (from previous patch attempts) pile up across
+    // retries, causing duplicate function definitions and growing files.
+    if (state.projectDir) {
+      const resetResult = await gitResetHard(state.projectDir);
+      if (resetResult.ok) {
+        log(colors.dim("  [Verifier] Reset to last checkpoint (coderFailed path)."));
+      }
+    }
     const failedTask =
       state.subtasks?.[state.currentSubtaskIndex]?.task ||
       "Complete the implementation";
