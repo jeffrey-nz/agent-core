@@ -147,6 +147,41 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
     );
   }
 
+  // Hazard: vanilla HTML drag-and-drop — dblclick handler must NOT use global dragData.
+  // dragData is only set during a drag operation (dragstart → dragend). During a
+  // double-click it is null, so `if (!t || !dragData) return` silently does nothing.
+  const touchesDragDrop = /dragData|dragstart|dragend|addEventListener.*drag|drag.*addEventListener|wireEvents|dblclick/i.test(taskAndNote);
+  const isVanillaJs = projectType !== "swift" && projectType !== "godot" && !/\.(ts|tsx)$/i.test(taskAndNote) && !/react|vite/i.test(taskAndNote);
+  if (touchesDragDrop && isVanillaJs) {
+    hazards.push(
+      `⚠️ VANILLA HTML DRAG-AND-DROP HAZARD\n` +
+      `\n` +
+      `1. DBLCLICK HANDLER — NEVER use \`dragData\` in a dblclick handler.\n` +
+      `   dragData is the global drag state set in ondragstart — it is NULL during a double-click.\n` +
+      `\n` +
+      `   WRONG (dragData is null during dblclick → silently does nothing):\n` +
+      `     root.addEventListener('dblclick', function(e) {\n` +
+      `       var t = e.target.closest('[draggable]');\n` +
+      `       if (!t || !dragData) return;  // ← dragData always null here\n` +
+      `       for (var i = 0; i < 4; i++) { if (moveToFoundation(dragData, i)) break; }\n` +
+      `     });\n` +
+      `\n` +
+      `   RIGHT (read the clicked card's data directly from its dataset):\n` +
+      `     root.addEventListener('dblclick', function(e) {\n` +
+      `       var t = e.target.closest('[draggable]');\n` +
+      `       if (!t) return;\n` +
+      `       var data = t.dataset;  // ← use the clicked element's dataset, not dragData\n` +
+      `       for (var i = 0; i < 4; i++) { if (moveToFoundation(data, i)) break; }\n` +
+      `     });\n` +
+      `\n` +
+      `2. DUPLICATE EVENT LISTENERS — NEVER register the same event on the same element twice.\n` +
+      `   If wireEvents() already has dragstart/dragend/dblclick listeners on 'root', do NOT add\n` +
+      `   another block that registers them again. The verifier will REJECT duplicate registrations.\n` +
+      `   If you need to rewrite the function, use write_file to replace the ENTIRE function body,\n` +
+      `   not patch_file to append a new block at the end.`,
+    );
+  }
+
   // Hazard: minimax orientation inversion — AI plays to LOSE instead of WIN.
   // The #1 correctness bug in chess AI implementations. Fires when the task
   // involves chess AI logic (chessAI.ts, getBestMove, minimax).

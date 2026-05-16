@@ -2766,6 +2766,83 @@ Replace ALL template literals in the broken .js file with string concatenation, 
     }
   }
 
+  // JS duplicate-code detection for vanilla HTML projects: catch duplicate var declarations
+  // (e.g. `var root = getElementById(...)` appearing twice) and duplicate addEventListener
+  // registrations on the same element variable+event, which indicate copy-paste duplication
+  // rather than intentional overwrites. These bugs pass the headless render check because
+  // the page loads fine, but cause double-firing events and confuse the requirements reviewer.
+  {
+    const projectDir = state.projectDir || "";
+    const hasPkg = await fs.promises.access(path.join(projectDir, "package.json")).then(() => true).catch(() => false);
+    const modifiedJsFiles = (state.modifiedFiles || []).filter(f => /\.m?js$/i.test(f) && !f.includes("node_modules"));
+
+    if (!hasPkg && modifiedJsFiles.length > 0) {
+      for (const jsFile of modifiedJsFiles) {
+        const absPath = path.isAbsolute(jsFile) ? jsFile : path.join(projectDir, jsFile);
+        try {
+          const src = await fs.promises.readFile(absPath, "utf8");
+
+          // 1. Duplicate getElementById variable assignments: `var root = document.getElementById(`
+          const idVarRe = /\bvar\s+(\w+)\s*=\s*document\.getElementById\(/g;
+          const idVarCounts = {};
+          let idMatch;
+          while ((idMatch = idVarRe.exec(src)) !== null) {
+            const name = idMatch[1];
+            idVarCounts[name] = (idVarCounts[name] || 0) + 1;
+          }
+          const dupIdVars = Object.entries(idVarCounts).filter(([, c]) => c > 1).map(([n]) => n);
+
+          // 2. Duplicate addEventListener registrations: `varname.addEventListener('eventtype'`
+          const addEvtRe = /\b(\w+)\.addEventListener\(\s*['"]([^'"]+)['"]/g;
+          const addEvtCounts = {};
+          let evtMatch;
+          while ((evtMatch = addEvtRe.exec(src)) !== null) {
+            const key = `${evtMatch[1]}.addEventListener('${evtMatch[2]}')`;
+            addEvtCounts[key] = (addEvtCounts[key] || 0) + 1;
+          }
+          const dupEvents = Object.entries(addEvtCounts).filter(([, c]) => c > 1).map(([k]) => k);
+
+          if (dupIdVars.length > 0 || dupEvents.length > 0) {
+            const dupVarDesc = dupIdVars.length > 0
+              ? `\nDuplicate getElementById assignments (same variable declared ${dupIdVars.map(n => `'${n}'`).join(", ")} more than once):\n${dupIdVars.map(n => `  • var ${n} = document.getElementById(...) — appears more than once in the file`).join("\n")}`
+              : "";
+            const dupEvtDesc = dupEvents.length > 0
+              ? `\nDuplicate addEventListener registrations (same element+event wired more than once):\n${dupEvents.map(k => `  • ${k} — registered more than once`).join("\n")}`
+              : "";
+            const newRetry = (state.coderRetryCount ?? 0) + 1;
+            log(colors.yellow(
+              `  [Verifier] JS duplicate detection: ${dupIdVars.length} dup var(s), ${dupEvents.length} dup event(s) in ${path.basename(jsFile)}`,
+            ));
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetry,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER JS DUPLICATE CODE DETECTION]
+
+${path.basename(jsFile)} contains DUPLICATE code that must be removed:
+${dupVarDesc}${dupEvtDesc}
+
+ROOT CAUSE: You appended a new code block without removing the old one. The file now has the same logic twice.
+
+REQUIRED FIX — use write_file to rewrite the ENTIRE function:
+1. Read the current file with read_file
+2. Find all duplicate blocks — keep ONLY the best/most complete version
+3. Remove all duplicate var declarations and duplicate event registrations
+4. Use write_file to write the complete corrected file (do NOT use patch_file — the structure is broken)
+
+The corrected wireEvents() (or equivalent) should register each event EXACTLY ONCE.
+
+CURRENT SUBTASK:
+${state.subtasks?.[state.currentSubtaskIndex]?.task || ""}`,
+              }],
+            };
+          }
+        } catch { /* skip */ }
+      }
+    }
+  }
+
   // TypeScript compilation gate: for React/TypeScript projects, run tsc --noEmit to
   // catch type errors in written .ts/.tsx files before accepting the subtask.
   // Mirrors the Swift swiftc -typecheck gate so TypeScript gets the same static analysis.
