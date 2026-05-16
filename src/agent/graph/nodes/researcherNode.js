@@ -474,7 +474,9 @@ At the end of your report, write a section titled exactly:
 List up to 15 bullet points containing only the most critical facts the implementor needs: exact file paths, class names, namespace names, assembly names, and hard constraints. This section will be injected verbatim into the coder's context window and must be completely self-contained.
 
 BLOCKED REPORT RULE (CRITICAL — prevents editing the wrong file):
-If the task names or implies specific files (e.g. "update the Link Grid template", "modify the link-grid SCSS") but you CANNOT find a matching file after a genuine search, you MUST:
+PREREQUISITE: You may ONLY report BLOCKED if you have ACTUALLY used list_dir or find_file tools to search and confirmed the file does not exist. Reporting BLOCKED without prior tool use is a hallucination that terminates the pipeline. If tools are unavailable, you CANNOT report BLOCKED — instead write what you know and proceed.
+
+If the task names or implies specific files (e.g. "update the Link Grid template", "modify the link-grid SCSS") but you CANNOT find a matching file AFTER A GENUINE TOOL-BASED SEARCH, you MUST:
 1. Write "⛔ BLOCKED: TARGET FILE NOT FOUND" in your KEY FINDINGS SUMMARY.
 2. List every search you tried (find_file patterns, grep patterns, directory listings).
 3. State clearly: "DO NOT substitute a different file. The coder must not edit a superficially similar file (e.g. Results.ss, Cards.ss) as a stand-in for the named target."

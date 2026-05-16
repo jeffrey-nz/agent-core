@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { streamText } from "ai";
 import { getMcpBoundTools } from "../../tools/sdkRegistry.js";
 import { eventBus } from "#web/eventBus.js";
@@ -7,6 +9,41 @@ import { personaMeta } from "../personas.js";
 import { MAX_STEPS_SCOPER, MAX_STEPS_SCOPER_REFINE } from "#config/pipeline.js";
 import { updateCheckpointState } from "../checkpointBridge.js";
 import { readMemoryFile } from "#docs/memory.js";
+
+// Extensions that count as code files for BLOCKED hallucination detection.
+const CODE_EXTS = new Set([
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+  ".html", ".css", ".scss", ".sass",
+  ".py", ".rb", ".go", ".php", ".vue", ".svelte",
+]);
+
+/**
+ * Checks whether any file mentioned in the task exists inside projectDir.
+ * Used to detect LLM hallucinations of BLOCKED when files genuinely exist.
+ */
+function taskFilesExistInProject(taskText, projectDir) {
+  if (!projectDir || !taskText) return false;
+  const mentioned = [...new Set(
+    (taskText.match(/\b[\w/-]+\.(?:js|jsx|ts|tsx|mjs|cjs|html|css|scss|sass|py|rb|go|php|vue|svelte)\b/g) || [])
+      .map((f) => path.basename(f))
+      .filter((f) => f.length > 1 && f.length < 60),
+  )];
+  if (mentioned.length === 0) return false;
+
+  const found = new Set();
+  const walk = (dir, depth = 0) => {
+    if (depth > 4 || found.size > 0) return;
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if ([".git", "node_modules", "vendor", ".venv"].includes(entry.name)) continue;
+        if (entry.isFile() && mentioned.includes(entry.name)) { found.add(entry.name); return; }
+        if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
+      }
+    } catch { /* unreadable */ }
+  };
+  walk(projectDir);
+  return found.size > 0;
+}
 
 const PERSONA = personaMeta("scoper");
 
@@ -43,19 +80,30 @@ export async function scoperNode(state, config) {
 
   // If the researcher reported BLOCKED (could not find target files), propagate that
   // immediately rather than letting the scoper substitute a different file.
-  // EXCEPTION: if the BLOCKED reason is tool unavailability (Copilot can't run list_dir/
-  // read_file), do NOT propagate — the PM can plan using the directory listing instead.
+  // EXCEPTIONS:
+  //   1. Tool unavailability: Copilot can't run list_dir/read_file — proceed with minimal scope.
+  //   2. Hallucination: files mentioned in the task actually exist in the workspace — some
+  //      LLMs (especially ChatGPT) generate BLOCKED without genuinely searching. Detect this
+  //      by checking the filesystem; if files exist, the block is a false positive.
   if (/⛔\s*BLOCKED[:\s]/i.test(researchReport)) {
     const toolUnavailability = /can'?t\s+(actually\s+)?run|can'?t\s+call|can'?t\s+(use|access)\s+(the\s+)?(tools?|list_dir|read_file)|no\s+access\s+to\s+tool|tool.*not\s+available/i.test(researchReport);
     if (!toolUnavailability) {
-      const blockedMatch = researchReport.match(/⛔\s*BLOCKED[\s\S]{0,600}/i);
-      const blockedSnippet = blockedMatch ? blockedMatch[0].slice(0, 600) : "Researcher reported BLOCKED.";
-      log(colors.red(`  [Graph] -> Scoper: researcher reported BLOCKED — propagating without scoping`));
-      return {
-        scopeDocument: `## SCOPE DOCUMENT\n\n⛔ BLOCKED — RESEARCHER COULD NOT FIND TARGET FILE\n\n${blockedSnippet}\n\nDo NOT proceed with implementation. The task description likely had file paths stripped by rich-text formatting. Ask the user to re-submit with the exact file path written in plain text.`,
-      };
+      if (taskFilesExistInProject(userTask, state.projectDir)) {
+        log(colors.yellow(
+          `  [Graph] -> Scoper: researcher reported BLOCKED but task files exist in workspace — likely hallucination, proceeding`,
+        ));
+        // Fall through to normal scoping
+      } else {
+        const blockedMatch = researchReport.match(/⛔\s*BLOCKED[\s\S]{0,600}/i);
+        const blockedSnippet = blockedMatch ? blockedMatch[0].slice(0, 600) : "Researcher reported BLOCKED.";
+        log(colors.red(`  [Graph] -> Scoper: researcher reported BLOCKED — propagating without scoping`));
+        return {
+          scopeDocument: `## SCOPE DOCUMENT\n\n⛔ BLOCKED — RESEARCHER COULD NOT FIND TARGET FILE\n\n${blockedSnippet}\n\nDo NOT proceed with implementation. The task description likely had file paths stripped by rich-text formatting. Ask the user to re-submit with the exact file path written in plain text.`,
+        };
+      }
+    } else {
+      log(colors.yellow(`  [Graph] -> Scoper: researcher BLOCKED due to tool unavailability — proceeding with minimal scope`));
     }
-    log(colors.yellow(`  [Graph] -> Scoper: researcher BLOCKED due to tool unavailability — proceeding with minimal scope`));
   }
 
   const systemPrompt = `You are a Codebase Scoper.
