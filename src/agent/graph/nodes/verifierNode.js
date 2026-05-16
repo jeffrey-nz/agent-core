@@ -506,6 +506,33 @@ async function _verifierImpl(state) {
     const newRetryCount = (state.coderRetryCount ?? 0) + 1;
     log(colors.red(`  [Graph] -> Verifier blocked: coder turn failed (${reason.slice(0, 80)}). Retry ${newRetryCount}/${effectiveMaxRetries}.`));
     const atCap = newRetryCount >= effectiveMaxRetries;
+
+    // Hard cap: if submission keeps failing after effectiveMaxRetries, force-advance
+    // rather than looping forever. Provider submission failures (rate limits, broken
+    // tabs, input-not-cleared) cannot be fixed by the coder — stop burning retries.
+    const isSubmissionFailure = /Failed to submit|input did not clear|TURN_SKIPPED|STALLED/i.test(reason);
+    const SUBMISSION_HARD_CAP = effectiveMaxRetries + 2;
+    if (atCap && isSubmissionFailure && newRetryCount >= SUBMISSION_HARD_CAP) {
+      const stuckTask = state.subtasks?.[state.currentSubtaskIndex]?.task || "unknown subtask";
+      const isLastSubtask = state.subtasks && (state.currentSubtaskIndex || 0) >= state.subtasks.length - 1;
+      log(colors.yellow(
+        `  [Verifier] Hard cap hit (${newRetryCount} submission failures) — force-advancing past: "${stuckTask.slice(0, 60)}"`,
+      ));
+      eventBus.emit("system_message", { text: `⚠ Provider submission failures exceeded hard cap — force-advancing`, type: "warning" });
+      if (isLastSubtask) {
+        return { verifierFeedback: "STUCK_TERMINAL", coderRetryCount: 0 };
+      }
+      return {
+        verifierFeedback: "STUCK_ADVANCE",
+        coderRetryCount: 0,
+        currentSubtaskIndex: (state.currentSubtaskIndex || 0) + 1,
+        messages: [{
+          role: "user",
+          content: `[SYSTEM] Subtask "${stuckTask}" could not be submitted to the AI provider after ${newRetryCount} attempts. Force-advancing to the next subtask.`,
+        }],
+      };
+    }
+
     const capWarning = atCap
       ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): If you do not write or modify a file in this response, this subtask will be force-skipped.`
       : "";
