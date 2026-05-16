@@ -442,6 +442,30 @@ export async function coderNode(state, config) {
     ? `- CRITICAL VERIFICATION: Before you finish this subtask, you MUST run the 'get_workspace_diagnostics' tool to verify you have not introduced syntax or compilation errors.\n`
     : "";
 
+  // Detect Copilot (Personal) provider early — used throughout prompt construction.
+  // Copilot refuses JSON write_file arrays; the pipeline uses <<<FILE:>>> format instead.
+  const isCopilot = state.provider?.providerName?.includes('copilot') ?? false;
+
+  // Vanilla HTML project: inject actual element IDs from index.html so the coder
+  // uses the correct IDs rather than inventing 1-indexed variants.
+  // Only runs for projects with index.html and no package.json (i.e. not React/Vite).
+  let vanillaHtmlIdsSection = "";
+  if (state.projectDir) {
+    try {
+      const hasPkg = await access(path.join(state.projectDir, "package.json")).then(() => true).catch(() => false);
+      if (!hasPkg) {
+        const htmlSrc = await readFile(path.join(state.projectDir, "index.html"), "utf8");
+        const idMatches = [...htmlSrc.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+        if (idMatches.length > 0) {
+          vanillaHtmlIdsSection = `\n⚠️ VANILLA HTML PROJECT — ELEMENT IDs (use EXACTLY these IDs in JavaScript):\n` +
+            `The following IDs exist in index.html: ${idMatches.join(", ")}\n` +
+            `CRITICAL: Do NOT use IDs that are not in this list. Do NOT offset by +1 — the IDs are 0-indexed.\n` +
+            `If you need a new element (e.g. stock-count), you MUST add it to index.html AND reference it correctly.\n`;
+        }
+      }
+    } catch { /* non-fatal — skip if index.html doesn't exist */ }
+  }
+
   // Constitutional AI: React scaffold hazard — detect when writing React/JSX/TSX files
   // into a project with no package.json, which makes the app unable to run or test.
   // The verifier skips test validation when package.json is absent → false PASS.
@@ -523,9 +547,13 @@ export async function coderNode(state, config) {
       ? (path.isAbsolute(firstPlannedFile) ? firstPlannedFile : path.join(state.projectDir, firstPlannedFile))
       : null;
     const firstWriteHint = firstWriteTarget
-      ? `\n⚡ FIRST ACTION: Your very first tool call MUST be:\n` +
-        `[{ "tool": "write_file", "path": "${firstWriteTarget}", "content": "...full file content..." }]\n` +
-        `Do NOT call list_dir, read_file, or any other tool before this write_file.\n`
+      ? isCopilot
+        ? `\n⚡ FIRST ACTION: Start immediately with the first file using <<<FILE:>>> format:\n` +
+          `<<<FILE: ${firstWriteTarget}>>>\n// complete file content here\n<<<END FILE>>>\n` +
+          `Do NOT wait — output the file content right away.\n`
+        : `\n⚡ FIRST ACTION: Your very first tool call MUST be:\n` +
+          `[{ "tool": "write_file", "path": "${firstWriteTarget}", "content": "...full file content..." }]\n` +
+          `Do NOT call list_dir, read_file, or any other tool before this write_file.\n`
       : "";
 
     // Inject key project config files so the coder doesn't need to read them
@@ -572,13 +600,18 @@ export async function coderNode(state, config) {
         `App.tsx passes onSquareClick={handleSquareClick} to ChessBoard.\n`
       : "";
 
-    newProjectSection =
-      `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
-      `- Every file in this subtask must be CREATED with write_file — there is no existing code to patch.\n` +
-      `- If a file already exists (e.g. App.tsx with Vite defaults), REPLACE it entirely with write_file.\n` +
-      `- Do NOT output prose descriptions of what you would write — use actual write_file tool calls.\n` +
-      `- After creating files, run npm run build (or equivalent) to verify there are no compile errors.\n` +
-      gameHookGuidance + firstWriteHint + injectedConfigs;
+    newProjectSection = isCopilot
+      ? `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
+        `- Every file in this subtask must be CREATED using the <<<FILE: path>>> format below.\n` +
+        `- Do NOT output prose descriptions — output actual file content using <<<FILE:>>> blocks.\n` +
+        `- After writing all files, output: TASK_DONE\n` +
+        gameHookGuidance + firstWriteHint + injectedConfigs
+      : `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
+        `- Every file in this subtask must be CREATED with write_file — there is no existing code to patch.\n` +
+        `- If a file already exists (e.g. App.tsx with Vite defaults), REPLACE it entirely with write_file.\n` +
+        `- Do NOT output prose descriptions of what you would write — use actual write_file tool calls.\n` +
+        `- After creating files, run npm run build (or equivalent) to verify there are no compile errors.\n` +
+        gameHookGuidance + firstWriteHint + injectedConfigs;
   }
 
   const coderDirective = buildCoderDirective(state.projectType);
@@ -881,16 +914,27 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
     log(colors.dim(`  [Memory] Skipped memory injection: ${memErr.message}`));
   }
 
-  const systemPrompt = `You are an expert Software Engineer.
-${memorySection}Your job is ONLY to implement the current assigned SUBTASK.
-${constraintsSection}${newProjectSection}
-[OVERALL EXECUTION PLAN]
-${state.executionPlan}
-${progressNote}${allModifiedFilesNote}
-[YOUR CURRENT SUBTASK]
-${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${hazardSection}${reactScaffoldWarning}${testContractBlock}
-${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${intentSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
-Instructions:
+  const fileOutputInstructions = isCopilot
+    ? `Instructions:
+- [REASONING] Think through what files you need to write, then output each file using the <<<FILE:>>> format below.
+- [FILE FORMAT] To create or modify a file, use this EXACT format (NO JSON, NO tool calls):
+  <<<FILE: /absolute/path/to/filename.ext>>>
+  complete file content here
+  <<<END FILE>>>
+- [BATCH WRITING] Write ALL files for this subtask by repeating the <<<FILE:>>>...<<<END FILE>>> block for each file. After all files: output TASK_DONE.
+- CRITICAL: Do NOT output JSON arrays. Do NOT use write_file syntax. Just use <<<FILE: path>>> blocks.
+- Use ABSOLUTE paths starting with ${state.projectDir}. Example: <<<FILE: ${state.projectDir}/index.html>>>
+- CRITICAL — BACKTICK STRIPPING: This environment removes ALL backtick characters from your output before saving. NEVER use template literals in any file you write. Use string concatenation instead:
+  WRONG (backticks stripped, becomes syntax error): card-\${rank} (missing quotes, broken)
+  RIGHT (use string concatenation):  'card-' + rank
+  WRONG: tableau-\${i + 1}  →  RIGHT: 'tableau-' + (i + 1)
+  WRONG: 'Hello ' + name + '!'  is right — NOT Hello \${name}!
+  Before finishing, scan your entire output — if you see any backtick character, replace it with string concatenation.
+${diagnosticsInstruction}- Do not deviate from the current subtask.
+${coderDirective}
+- EXISTING FILES: For files that already exist and need updates, rewrite the complete file content inside <<<FILE:>>>...<<<END FILE>>> blocks.
+- After writing all files, output: TASK_DONE`
+    : `Instructions:
 - [REASONING PROTOCOL] Start your response with a thinking block:\n<think>\nTask: what this subtask achieves\nFiles to write: [every file this subtask needs — list ALL of them]\nRead first: [files that must be read before writing, or "none"]\n</think>\nThen IMMEDIATELY output the JSON array with ALL tool calls.
 - [BATCH WRITING] Write ALL files for this subtask in ONE JSON array. Do NOT write one file, wait for results, then write the next. For a subtask with 5 files: put all 5 write_file calls in a single array. When done: output TASK_DONE.
 - CRITICAL - PROSE OUTPUT IS NOT A FILE WRITE: Writing code as text in your response does NOT create any file — it is immediately discarded. You MUST use write_file or patch_file tool calls: [{"tool": "write_file", "path": "/abs/path", "content": "..."}]
@@ -907,15 +951,43 @@ ${buildAcceptanceTestDirective(state.projectType)}
 - FILE OPERATION REQUIREMENT: If this subtask requires code changes (implementation, fix, refactor, etc.), you MUST produce at least one write_file or patch_file tool call. If you genuinely cannot make any change (e.g., the code is already correct), you MUST output a JSON field at the end of your response: \"NO_CHANGES_NEEDED\": true. Do NOT output this flag if you wrote any files.
 - After executing, summarize your changes so the verifier can assess them.`;
 
+  // For Copilot (chunked provider), inject a compact task reminder at the END of the
+  // system prompt so it lands in the final chunk (not in an ACK chunk where Copilot
+  // is told "DO NOT WRITE FILES").  Without this, the [YOUR CURRENT SUBTASK] section
+  // appears in chunk 1 → Copilot processes it as context only → final chunk has only
+  // instructions without the specific task → Copilot writes nothing.
+  const copilotFinalReminder = isCopilot
+    ? `\n[ACTION — WRITE THESE FILES NOW]\nTask: ${currentTask.slice(0, 400)}${subtaskFilesNote}\nOutput each file using <<<FILE: /abs/path>>> ... <<<END FILE>>> then TASK_DONE.\n`
+    : "";
+
+  const systemPrompt = `You are an expert Software Engineer.
+${memorySection}Your job is ONLY to implement the current assigned SUBTASK.
+${constraintsSection}${newProjectSection}
+[OVERALL EXECUTION PLAN]
+${state.executionPlan}
+${progressNote}${allModifiedFilesNote}
+[YOUR CURRENT SUBTASK]
+${currentTask}${subtaskFilesNote}${subtaskLineRangeNote}${subtaskImplNote}${subtaskConstraintsNote}${subtaskAcceptanceCriteria}${subtaskFailureCriteria}${vanillaHtmlIdsSection}${hazardSection}${reactScaffoldWarning}${testContractBlock}
+${processRewardNote}${toolEfficiencyNote}${effectiveScopeSection || researchSection}${intentSection}${localDevUrlSection}${proceduralSection}${ragSection}${environmentSection}${retrievedContextSection}${crossSessionReflexionSection}${criticSection}${debugSection}${reflexionSection}${retrySection}
+${fileOutputInstructions}${copilotFinalReminder}`;
+
   // Phase-isolated context: on the first turn of each subtask, strip all the
   // accumulated researcher/scoper/PM messages — the system prompt already injects
   // research, scope, intent, and the current subtask.  Only the original user
   // request is kept so the coder starts with a clean context window (~10KB vs
   // 80-100KB), cutting first-turn latency from 30-60 s to 8-15 s.
   // On retries we keep a recent tail so the coder sees its own prior exchange.
+  const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
   let windowedMessages;
   if (retryCount === 0 && !isStallRetry) {
     // Fresh subtask start — only the original user task message.
+    windowedMessages = [state.messages[0]].filter(Boolean);
+  } else if (isChunkedProvider) {
+    // Chunked provider (e.g. Copilot, 9500 char limit): keep ONLY the original
+    // task message on all retries.  Each added tail message grows the prompt by
+    // another chunk, making Copilot progressively more confused.  The retry
+    // context (failure type, strategy hint) is already injected via retrySection
+    // in the system prompt, so the history is redundant.
     windowedMessages = [state.messages[0]].filter(Boolean);
   } else {
     // Retry — use a shrinking tail of recent messages so the coder sees what
@@ -1232,14 +1304,42 @@ ${buildAcceptanceTestDirective(state.projectType)}
         });
 
         const bareTask = state.subtasks?.[state.currentSubtaskIndex]?.task || "complete the subtask";
-        const nuclearMessages = [
-          ...messages,
-          { role: "assistant", content: fullText },
-          {
-            role: "user",
-            content: `YOU OUTPUT FILE CONTENT AS PLAIN TEXT INSTEAD OF USING TOOL CALLS. This is wrong.\n\nDo NOT describe what you will do. Do NOT write file content in your response text.\nIMMEDIATELY call write_file or patch_file with the content as a tool argument — nothing else.\n\nTask: ${bareTask}`,
-          },
-        ];
+        const plannedFiles = state.subtasks?.[state.currentSubtaskIndex]?.files || [];
+
+        // For chunked providers (e.g. Copilot, maxPromptChars ≤ 9500) appending the
+        // prose response and the correction message makes the context even larger,
+        // producing more chunks and deepening the confusion.  Instead, start a fresh
+        // session and send a minimal, targeted prompt that fits in a single chunk.
+        const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+        let nuclearMessages;
+        if (isChunkedProvider && plannedFiles.length > 0 && state.projectDir) {
+          log(colors.yellow(`  [Graph] -> Nuclear retry: chunked provider — using minimal fresh-session prompt`));
+          try {
+            await state.provider.startNewChat?.();
+          } catch (_) { /* ignore */ }
+          const fileSnippets = await Promise.all(
+            plannedFiles.slice(0, 2).map(async (f) => {
+              const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+              try {
+                const content = await readFile(abs, "utf8");
+                return `\n<<<CURRENT FILE: ${f}>>>\n${content}\n<<<END FILE>>>`;
+              } catch { return ""; }
+            }),
+          );
+          const minimalPrompt =
+            `TASK: ${bareTask}\n\nYou MUST use write_file — output ONLY the JSON tool call array, then TASK_DONE. No prose.\n` +
+            fileSnippets.join("\n");
+          nuclearMessages = [{ role: "user", content: minimalPrompt }];
+        } else {
+          nuclearMessages = [
+            ...messages,
+            { role: "assistant", content: fullText },
+            {
+              role: "user",
+              content: `YOU OUTPUT FILE CONTENT AS PLAIN TEXT INSTEAD OF USING TOOL CALLS. This is wrong.\n\nDo NOT describe what you will do. Do NOT write file content in your response text.\nIMMEDIATELY call write_file or patch_file with the content as a tool argument — nothing else.\n\nTask: ${bareTask}`,
+            },
+          ];
+        }
 
         try {
           const nuclearResult = await state.provider.sendTurn(nuclearMessages, "coder", context);

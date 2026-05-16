@@ -458,6 +458,24 @@ export async function patchReviewerNode(state) {
   const allIssues = [];
 
   for (const relPath of modifiedFiles.slice(0, 8)) {
+    // Reject placeholder paths like "path/to/file.ext", "...", or "filename.ext"
+    const normalizedRel = relPath.replace(/\\/g, "/");
+    const isPlaceholderPath =
+      /^path\/to\//i.test(normalizedRel) ||
+      /\/path\/to\//i.test(normalizedRel) ||
+      /^\.\.\./.test(normalizedRel) ||
+      /^[^/]+\.(ext|example|placeholder)$/i.test(path.basename(normalizedRel));
+    if (isPlaceholderPath) {
+      allIssues.push({
+        file: relPath,
+        type: "PLACEHOLDER_PATH",
+        description:
+          `File written to a placeholder path "${relPath}" — this is a template example, not a real project path.\n` +
+          `Determine the correct file path in the project and write to that location instead.`,
+      });
+      continue;
+    }
+
     const absPath = path.isAbsolute(relPath) ? relPath : path.join(projectDir, relPath);
     const filename = path.basename(relPath);
     const ext = path.extname(relPath).toLowerCase();
@@ -478,6 +496,27 @@ export async function patchReviewerNode(state) {
         description:
           `File appears to be a stub or placeholder (${content.replace(/\s/g, "").length} non-whitespace chars).\n` +
           `The file may not contain the full implementation. Verify it is complete.`,
+      });
+    }
+
+    // 1b. Stub comment pattern — coder wrote placeholder text like
+    //     "// Existing logic would normally be defined above this comment"
+    //     instead of actual code. Catch this explicitly since such files
+    //     can be hundreds of lines of real-looking stubs.
+    const stubCommentPattern = /\/\/\s*(existing|previous|original|prior)\s+\w+.*(would|normally|should|already).*(be|is|are)\s+(defined|present|above|here|in\s+place)/i;
+    const stubCssPattern = /\/\*\s*(existing|previous|original|prior)\s+\w+.*(would|normally|should|already).*(be|is|are)\s+(defined|present|above|here|in\s+place)/i;
+    // Also catch "...full content..." / "...existing code..." triple-dot placeholders
+    // written by Copilot when it hits context limits and can't write the actual file.
+    const tripleDotPlaceholder = /^\s*\.\.\.(full content|existing content|existing code|rest of file|rest of code|previous content|original code)\.\.\.\s*$/im;
+    if (stubCommentPattern.test(content) || stubCssPattern.test(content) || tripleDotPlaceholder.test(content)) {
+      allIssues.push({
+        file: relPath,
+        type: "STUB_COMMENT",
+        description:
+          `File contains a placeholder ("...full content..." or stub comment) instead of actual code.\n` +
+          `You MUST write the COMPLETE file content — not a placeholder referencing the existing code.\n` +
+          `The existing file content is NOT automatically included. You must write every line explicitly.\n` +
+          `Read the current file first to see what's there, then rewrite it completely with your additions.`,
       });
     }
 
@@ -512,12 +551,39 @@ export async function patchReviewerNode(state) {
       const syntaxResult = await execAsync(`node --check ${JSON.stringify(absPath)}`);
       if (syntaxResult.status !== 0) {
         const errText = (syntaxResult.stderr || syntaxResult.stdout || "").trim();
+        // Detect stripped template literal backticks: SyntaxError involving `${`
+        const strippedBacktick = /Unexpected token '\{'/.test(errText) || /\$\{/.test(errText);
+        const backtickWarning = strippedBacktick
+          ? `\n\nCRITICAL — Template literal backticks are stripped by this environment.\n` +
+            `DO NOT use template literals (backtick strings). Use string concatenation instead:\n` +
+            `  WRONG:  id: \`card-\${rank}_of_\${suit}\`\n` +
+            `  RIGHT:  id: 'card-' + rank + '_of_' + suit\n` +
+            `Replace ALL template literals in the file with string concatenation.`
+          : "";
         allIssues.push({
           file: relPath,
           type: "JS_SYNTAX_ERROR",
           description:
-            `JavaScript syntax error detected by \`node --check\`:\n\n${errText}\n\n` +
-            `Fix the syntax error(s) above using patch_file or write_file before this subtask can pass.`,
+            `JavaScript syntax error detected by \`node --check\`:\n\n${errText}${backtickWarning}\n\n` +
+            `Fix the syntax error(s) above using write_file before this subtask can pass.`,
+        });
+      }
+    }
+
+    // 6. TypeScript file in a non-TypeScript project — catches .ts/.tsx files
+    //    written to a project with no tsconfig.json or package.json (vanilla HTML/JS).
+    //    The browser cannot execute TypeScript directly; without a bundler it is dead code.
+    if (/\.(ts|tsx)$/i.test(ext) && projectDir) {
+      const hasTsConfig = await fs.access(path.join(projectDir, "tsconfig.json")).then(() => true).catch(() => false);
+      const hasPkg = await fs.access(path.join(projectDir, "package.json")).then(() => true).catch(() => false);
+      if (!hasTsConfig && !hasPkg) {
+        allIssues.push({
+          file: relPath,
+          type: "TS_IN_VANILLA_PROJECT",
+          description:
+            `TypeScript file "${relPath}" written to a vanilla HTML/JS project — no tsconfig.json or package.json found.\n` +
+            `Browsers cannot execute TypeScript directly. This file will never be loaded.\n` +
+            `Use plain JavaScript (.js) instead: implement the logic directly in the existing .js file(s).`,
         });
       }
     }

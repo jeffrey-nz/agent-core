@@ -17,7 +17,10 @@ export async function runAutomationAgentLoop({
   send,
   requireWriteFile = true,
   requireTools = false,
+  providerName = null,
 }) {
+  const isCopilot = providerName?.includes('copilot') ?? false;
+
   const state = createLoopState({
     remoteSessionId,
     rootDir,
@@ -27,6 +30,7 @@ export async function runAutomationAgentLoop({
     send,
     requireWriteFile,
     requireTools,
+    providerName,
   });
 
   state.phase = SESSION_PHASES.PLAN;
@@ -124,7 +128,21 @@ export async function runAutomationAgentLoop({
     // wait for the EXECUTE phase transition that the normal no-activity logic
     // requires. Copilot365 habitually responds conversationally instead of
     // outputting tool call JSON; this recovery snaps it back on track.
-    if (state.requireTools && !parsed.hasActivity && !state.madeProgress) {
+    //
+    // Exception: read-only phases (scoper/researcher) produce prose as their
+    // deliverable (the scope doc / research report). If the model outputs
+    // substantial prose without calling any tools, accept it and exit — the
+    // prose IS the output. Don't send tools-required recovery, which would
+    // cause the model to output TASK_DONE instead of the document.
+    if (state.toolContext?.readOnly && !parsed.hasActivity) {
+      const proseText = String(state.responseText || "").trim();
+      if (proseText.length > 50) {
+        log(colors.dim(`  [Protocol] ${state.label}: read-only prose output accepted (${proseText.length} chars) — exiting loop.`));
+        break;
+      }
+    }
+
+    if (state.requireTools && !parsed.hasActivity && !state.madeProgress && !state.toolContext?.readOnly) {
       state.consecutiveNoActivity++;
 
       if (state.consecutiveNoActivity >= 3) {
@@ -239,12 +257,18 @@ export async function runAutomationAgentLoop({
 
         state.responseText = await state.send(
           state.remoteSessionId,
-          `[SUBTASK START REQUIRED — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
-            `Your response contained no tool calls. The current subtask has NOT been started yet — no files have been written.\n\n` +
-            `You MUST call write_file or patch_file NOW to begin implementing the subtask.\n` +
-            `Use the REAL file path under ${state.rootDir}:\n` +
-            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
-            `Replace "src/filename.js" with the actual file you need to create. Do NOT output [] or prose.`,
+          isCopilot
+            ? `[SUBTASK START REQUIRED — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
+                `Your response contained no file output. The current subtask has NOT been started yet — no files have been written.\n\n` +
+                `You MUST output file content using the <<<FILE:>>> format NOW:\n\n` +
+                `<<<FILE: ${state.rootDir}/filename.js>>>\n// your complete file content here\n<<<END FILE>>>\n\n` +
+                `Replace "filename.js" with the actual file you need to create. After all files, output: TASK_DONE`
+            : `[SUBTASK START REQUIRED — attempt ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]\n\n` +
+                `Your response contained no tool calls. The current subtask has NOT been started yet — no files have been written.\n\n` +
+                `You MUST call write_file or patch_file NOW to begin implementing the subtask.\n` +
+                `Use the REAL file path under ${state.rootDir}:\n` +
+                `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
+                `Replace "src/filename.js" with the actual file you need to create. Do NOT output [] or prose.`,
           `${state.label} [subtask-start ${consecutiveToolPlan}/${MAX_TOOL_PLAN_RETRIES}]`,
         );
         state.consecutiveNoActivity = 0;
@@ -396,7 +420,11 @@ export async function runAutomationAgentLoop({
       // rather than the blanket "no tool calls" check.
       if (state.requireWriteFile && !state.requireTools && !state.madeProgress) {
         const rawText = String(state.responseText || "");
-        const looksLikeProse =
+        // <<<FILE: path>>> blocks are Copilot's native file format — NOT prose.
+        // Strategy 7 in StructuredOutputParser should have already extracted them,
+        // but if they appear here (e.g. mid-loop), don't misclassify as prose.
+        const hasCopilotFileBlocks = rawText.includes("<<<FILE:") && rawText.includes("<<<END FILE>>>");
+        const looksLikeProse = !hasCopilotFileBlocks && (
           rawText.includes("```") ||
           rawText.trimStart().startsWith("using ") ||
           rawText.trimStart().startsWith("public ") ||
@@ -412,7 +440,8 @@ export async function runAutomationAgentLoop({
           /^(export\s+)?(const|function|class)\s+[A-Z]/m.test(rawText) ||
           /^(export\s+)?(type|interface)\s+\w/m.test(rawText) ||
           // Long response (> 500 chars) with zero tool calls is almost certainly prose
-          (rawText.length > 500 && !rawText.includes("[{"));
+          (rawText.length > 500 && !rawText.includes("[{"))
+        );
 
         if (looksLikeProse) {
           consecutiveProse++;
@@ -435,13 +464,19 @@ export async function runAutomationAgentLoop({
 
           state.responseText = await state.send(
             state.remoteSessionId,
-            `[WRITE_FILE REQUIRED — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
-              `Your previous response contained file content as prose text (markdown code blocks or raw code). ` +
-              `This is a pipeline failure — prose is DISCARDED and no file was written to disk.\n\n` +
-              `You MUST call write_file or patch_file with the file content as the "content" argument.\n` +
-              `Use the REAL path of the file you want to create (under ${state.rootDir}):\n` +
-              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
-              `Do NOT explain. Output ONLY the JSON tool call array.`,
+            isCopilot
+              ? `[FILE OUTPUT REQUIRED — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
+                  `Your previous response contained file content as plain text. This was not saved to disk.\n\n` +
+                  `You MUST output files using the <<<FILE:>>> format:\n\n` +
+                  `<<<FILE: ${state.rootDir}/filename.js>>>\n// complete file content here\n<<<END FILE>>>\n\n` +
+                  `Use the REAL filename. Write ALL files this subtask needs. Then output: TASK_DONE`
+              : `[WRITE_FILE REQUIRED — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
+                  `Your previous response contained file content as prose text (markdown code blocks or raw code). ` +
+                  `This is a pipeline failure — prose is DISCARDED and no file was written to disk.\n\n` +
+                  `You MUST call write_file or patch_file with the file content as the "content" argument.\n` +
+                  `Use the REAL path of the file you want to create (under ${state.rootDir}):\n` +
+                  `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
+                  `Do NOT explain. Output ONLY the JSON tool call array.`,
             `${state.label} [prose-recovery ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
           );
           state.consecutiveNoActivity = 0;

@@ -40,6 +40,7 @@ Review the plan against the intent document and scope document. Check for:
 3. MISSING COVERAGE: Success criteria from the intent that have no corresponding implementation subtask
 4. WRONG ORDER: Acceptance test subtask is not last; db:build/sake commands before all file writes; wrong dependency order
 5. VAGUE NOTES: implementation_note fields that say "modify as needed" or similar — must be specific enough to implement without reading any file
+6. FRAMEWORK OVERREACH: Plan introduces TypeScript, React, Vite, or a build toolchain when the user's original request specifies plain .js/.html files or uses CommonJS require(). If the user asked for game.js and test.js with require('./game.js'), the plan must NOT use React/Vite/TypeScript — plain HTML + vanilla JS is the correct deliverable. Fix by replacing the Vite scaffold subtask with direct file creation subtasks for the requested plain files.
 
 If the plan is acceptable (≤1 minor issues): respond with exactly the text: PLAN_VALID
 
@@ -60,6 +61,15 @@ export async function planValidatorNode(state, config) {
 
   // If we have neither a model nor provider, skip gracefully
   if (!state.model && !state.provider) {
+    return { planValidated: true, currentPersona: PERSONA.id };
+  }
+
+  // Skip for chunked providers (e.g. Copilot) — the plan was either synthesized
+  // from the task description (reliable) or produced by the minimal PM prompt.
+  // Sending a planValidator turn wastes a Copilot quota slot with no benefit.
+  const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+  if (isChunkedProvider) {
+    log(colors.dim(`  [Graph] -> Plan Validator: skipping for chunked provider`));
     return { planValidated: true, currentPersona: PERSONA.id };
   }
 

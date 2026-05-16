@@ -43,13 +43,19 @@ export async function scoperNode(state, config) {
 
   // If the researcher reported BLOCKED (could not find target files), propagate that
   // immediately rather than letting the scoper substitute a different file.
+  // EXCEPTION: if the BLOCKED reason is tool unavailability (Copilot can't run list_dir/
+  // read_file), do NOT propagate — the PM can plan using the directory listing instead.
   if (/⛔\s*BLOCKED[:\s]/i.test(researchReport)) {
-    const blockedMatch = researchReport.match(/⛔\s*BLOCKED[\s\S]{0,600}/i);
-    const blockedSnippet = blockedMatch ? blockedMatch[0].slice(0, 600) : "Researcher reported BLOCKED.";
-    log(colors.red(`  [Graph] -> Scoper: researcher reported BLOCKED — propagating without scoping`));
-    return {
-      scopeDocument: `## SCOPE DOCUMENT\n\n⛔ BLOCKED — RESEARCHER COULD NOT FIND TARGET FILE\n\n${blockedSnippet}\n\nDo NOT proceed with implementation. The task description likely had file paths stripped by rich-text formatting. Ask the user to re-submit with the exact file path written in plain text.`,
-    };
+    const toolUnavailability = /can'?t\s+(actually\s+)?run|can'?t\s+call|can'?t\s+(use|access)\s+(the\s+)?(tools?|list_dir|read_file)|no\s+access\s+to\s+tool|tool.*not\s+available/i.test(researchReport);
+    if (!toolUnavailability) {
+      const blockedMatch = researchReport.match(/⛔\s*BLOCKED[\s\S]{0,600}/i);
+      const blockedSnippet = blockedMatch ? blockedMatch[0].slice(0, 600) : "Researcher reported BLOCKED.";
+      log(colors.red(`  [Graph] -> Scoper: researcher reported BLOCKED — propagating without scoping`));
+      return {
+        scopeDocument: `## SCOPE DOCUMENT\n\n⛔ BLOCKED — RESEARCHER COULD NOT FIND TARGET FILE\n\n${blockedSnippet}\n\nDo NOT proceed with implementation. The task description likely had file paths stripped by rich-text formatting. Ask the user to re-submit with the exact file path written in plain text.`,
+      };
+    }
+    log(colors.yellow(`  [Graph] -> Scoper: researcher BLOCKED due to tool unavailability — proceeding with minimal scope`));
   }
 
   const systemPrompt = `You are a Codebase Scoper.

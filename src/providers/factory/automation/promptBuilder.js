@@ -1,4 +1,5 @@
 const COPILOT_365_PROVIDER = "copilot365";
+const COPILOT_PERSONAL_PROVIDER = "copilot";
 
 // Build tool schema with actual rootDir paths so the model doesn't invent placeholders.
 function buildCoreTools(rootDir) {
@@ -51,6 +52,7 @@ export function buildAutomationPromptText({
   const isDebugging = interactionMode === "debugging";
   const isReadOnly = interactionMode === "readOnly";
   const isCopilot365 = providerName === COPILOT_365_PROVIDER;
+  const isCopilotPersonal = providerName === COPILOT_PERSONAL_PROVIDER;
 
   const allAllowed = Array.from(
     new Set([rootDir, ...allowedDirs].filter(Boolean)),
@@ -80,7 +82,39 @@ Output tool calls as a single JSON array. ${pathsRule}. Do NOT modify files.`;
             ? ""
             : `get_workspace_diagnostics | {"tool":"get_workspace_diagnostics"}\n`;
 
-          content += `
+          if (isCopilotPersonal) {
+            // Copilot Personal refuses JSON tool-call arrays and interprets "write_file"
+            // as a file-system execution it cannot perform. Use the <<<FILE:>>> delimiter
+            // format instead — StructuredOutputParser Strategy 7 extracts these blocks.
+            content += `
+
+Project root: ${rootDir}
+
+## FILE OUTPUT FORMAT
+
+To create or modify a file, use this EXACT format:
+<<<FILE: ${rootDir}/path/to/filename.ext>>>
+complete file content here
+<<<END FILE>>>
+
+Example — creating index.html:
+<<<FILE: ${rootDir}/index.html>>>
+<!DOCTYPE html>
+<html lang="en">
+<body>Hello World</body>
+</html>
+<<<END FILE>>>
+
+Write ALL required files by repeating this pattern. After all files, output: TASK_DONE
+
+## RULES
+- ${pathsRule}
+- Do NOT output JSON arrays. Do NOT use write_file syntax. Use <<<FILE:>>> blocks ONLY.
+- Include complete file content — never placeholder comments or "..." truncations.
+- For a new project: write ALL files immediately, do not wait.
+${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}`;
+          } else {
+            content += `
 
 Project root: ${rootDir}
 
@@ -120,6 +154,7 @@ ${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}
 ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
   ? "⚡ NEW PROJECT: Write ALL files immediately. Do NOT list_dir or read_file first — nothing exists yet."
   : ""}`;
+          }
         }
       }
 

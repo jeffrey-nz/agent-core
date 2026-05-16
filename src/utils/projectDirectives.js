@@ -172,6 +172,9 @@ const NODE_CONSTRAINTS = `[PROJECT TYPE: Node.js / TypeScript]
 - Tests: vitest or jest
 - Type checking: npx tsc --noEmit
 
+FRAMEWORK SCOPE RULE (CRITICAL — do NOT violate):
+If the user's request specifies plain .js or .html files, uses CommonJS require(), or says "node test.js", do NOT introduce TypeScript, React, Vite, or any build toolchain. Plain HTML + vanilla JS is a valid and complete deliverable. Only add a framework (Vite/React/TypeScript/Next.js) when the user explicitly requests it or when the existing project already uses it. Building with React when the user asked for game.js + index.html is scope overreach and will fail acceptance tests that use require('./game.js').
+
 PROJECT SETUP (MANDATORY for all new Node.js / React / Vite projects — enforced by verifier):
 - GITIGNORE FIRST: The VERY FIRST file written for any new project MUST be .gitignore. It MUST contain at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. Skipping this causes git to track thousands of dependency files — the verifier will reject the subtask.
 - README REQUIRED: Every new project MUST include README.md with: project name, one-line description, and the commands: npm install, npm run dev, npm run build, npm test.
@@ -479,7 +482,15 @@ const UNITY_TDD_DIRECTIVE = `IMPORTANT: This is a Unity project. Do NOT mandate 
 
 const NODE_TDD_DIRECTIVE = `You are encouraged to apply TDD where natural. For JS/TS projects, writing a failing test first is appropriate — BUT ONLY if the source module it imports already exists. If both the source module AND the test file are being created as part of this plan, the source module subtask MUST come first. NEVER create a test subtask that imports a not-yet-existing module before the module creation subtask. For other project types, only add test subtasks if the task explicitly requires them.
 
-ANTI-STUB RULE (CRITICAL): When the task requires implementing logic (getLegalMoves, validateMove, calculateScore, etc.), the implementation subtask MUST produce a REAL implementation — NOT a stub that returns [] or false or null. A test subtask that passes because the implementation is an empty stub is a false pass and a pipeline failure. The implementation note MUST explicitly say "REAL implementation required — do NOT return [] or placeholder values." If a function cannot be fully implemented yet (dependency not ready), create the dependency first as its own subtask, then implement the function.`;
+ANTI-STUB RULE (CRITICAL): When the task requires implementing logic (getLegalMoves, validateMove, calculateScore, etc.), the implementation subtask MUST produce a REAL implementation — NOT a stub that returns [] or false or null. A test subtask that passes because the implementation is an empty stub is a false pass and a pipeline failure. The implementation note MUST explicitly say "REAL implementation required — do NOT return [] or placeholder values." If a function cannot be fully implemented yet (dependency not ready), create the dependency first as its own subtask, then implement the function.
+
+GAME TEST COVERAGE RULE: When the task builds any game (board game, card game, puzzle), the test file MUST cover ALL of the following or the plan is incomplete:
+1. Every piece/unit type: both a legal move and an illegal move for each type (pawn forward/sideways, rook straight/diagonal, etc.)
+2. Win/loss end condition: simulate the exact sequence that ends the game and assert the correct terminal state
+3. Domain edge cases: for chess — pawn promotion (pawn reaches back rank → becomes queen), pawn two-square start, captures; for checkers — multi-jump, king promotion; include at least one test per domain-specific rule
+4. Turn enforcement: assert a piece of the wrong color cannot be moved on the opponent's turn
+5. UI state machine (if DOM-based): select a piece, re-select a different friendly piece (should switch, not deselect), click the selected piece again (should deselect), make an invalid move (should deselect and not advance the turn), make a valid move (turn switches). Simulate these as pure JS state machine calls without a browser.
+A test file that only checks "piece moves from A to B" without covering items 2-5 above will leave critical bugs undetected.`;
 
 const GENERIC_TDD_DIRECTIVE = `Only add test subtasks if the task explicitly requires them. Do not force TDD for non-JS/TS projects.`;
 

@@ -415,10 +415,19 @@ async function _verifierImpl(state) {
   // subtask after the scaffold so a missing package.json/vite.config never silently
   // cascades through the rest of the pipeline.
   if (state.projectDir && (state.currentSubtaskIndex ?? 0) >= 1) {
-    const srcHasTsFiles = await fs.promises.readdir(path.join(state.projectDir, "src"))
-      .then(files => files.some(f => /\.(ts|tsx)$/.test(f)))
-      .catch(() => false);
-    if (srcHasTsFiles) {
+    // Only trigger scaffold check for React+Vite projects. A vanilla HTML+JS project
+    // may have a src/ directory with .ts files but should NOT be required to have
+    // package.json, App.tsx, or vite.config.ts. Detect React+Vite by checking for
+    // clear markers: src/App.tsx exists, or vite.config.ts exists, or package.json
+    // with a react dependency exists.
+    const srcHasAppTsx = await fs.promises.access(path.join(state.projectDir, "src", "App.tsx"))
+      .then(() => true).catch(() => false);
+    const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts"))
+      .then(() => true).catch(() => false);
+    const hasPkgJson = await fs.promises.access(path.join(state.projectDir, "package.json"))
+      .then(() => true).catch(() => false);
+    const isReactViteProject = srcHasAppTsx || hasViteConfig || hasPkgJson;
+    if (isReactViteProject) {
       const scaffoldToCheck = ["package.json", "src/App.tsx", "vite.config.ts", "index.html"];
       const missingScaffold = [];
       for (const f of scaffoldToCheck) {
@@ -2515,11 +2524,15 @@ ${currentTask}${capWarning}`,
     // 5 retries inside this one gate.
     const cssGateRetries = state.coderRetryCount ?? 0;
 
+    // Copilot can't call read_file inline, so this gate would always loop for
+    // Copilot sessions. Skip it — the headless gate catches functional mismatches.
+    const _isCopilotCss = state.provider?.providerName?.includes('copilot') ?? false;
     if (
       !readConsumerEvidence &&
       !consumerWritten &&
       !consumerExistsFromPriorSubtask &&
-      cssGateRetries < 1
+      cssGateRetries < 1 &&
+      !_isCopilotCss
     ) {
       const consumerPaths = (state.modifiedFiles || []).filter(f =>
         /\.(jsx|tsx|html?)$/.test(f),
@@ -2583,7 +2596,11 @@ Do NOT output [] without reading the consumer first. The verifier checks your re
         /"read_file"[^}]{1,200}\.js"?/.test(lastResp) ||
         /read_file[^\n]{1,100}\.js\b/.test(lastResp);
 
-      if (jsModules.length > 0 && !jsAlsoWrittenThisSubtask && !readJsEvidence) {
+      // Copilot can't call read_file inline (it only outputs <<<FILE:>>> blocks),
+      // so this check would loop forever for Copilot sessions. The headless gate
+      // still catches functional ID/shape mismatches, so safety is preserved.
+      const isCopilotProvider = state.provider?.providerName?.includes('copilot') ?? false;
+      if (jsModules.length > 0 && !jsAlsoWrittenThisSubtask && !readJsEvidence && !isCopilotProvider) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(colors.yellow(
           `  [Graph] -> HTML written but no sibling JS module read — requiring API-shape consistency verification.`,
@@ -2618,25 +2635,36 @@ Do NOT output [] without reading the JS module first. The verifier checks your r
   {
     const projectDir = state.projectDir || "";
     const allFiles = state.allModifiedFiles || [];
-    const hasHtml = allFiles.some(f => /\.html?$/i.test(f));
-    const hasJs = allFiles.some(f => /\.m?js$/i.test(f));
-    const hasReact = allFiles.some(f => /\.(jsx|tsx)$/.test(f));
+    // Check project type by scanning the project directory directly — not just
+    // modified files, so the gate fires even when only .ts or other non-JS files
+    // were modified in the current round but the project is a vanilla HTML+JS app.
     const hasPkg = await fs.promises.access(path.join(projectDir, "package.json"))
       .then(() => true).catch(() => false);
+    const hasReact = allFiles.some(f => /\.(jsx|tsx)$/.test(f));
+    const indexHtml = path.join(projectDir, "index.html");
+    const indexHtmlExists = projectDir
+      ? await fs.promises.access(indexHtml).then(() => true).catch(() => false)
+      : false;
 
-    if (hasHtml && hasJs && !hasReact && !hasPkg && projectDir) {
-      // Find the main HTML entry point
-      const htmlCandidates = allFiles
-        .filter(f => /\.html?$/i.test(f))
-        .map(f => path.isAbsolute(f) ? f : path.join(projectDir, f));
-      const indexHtml =
-        htmlCandidates.find(f => /index\.html?$/i.test(f)) || htmlCandidates[0];
+    if (indexHtmlExists && !hasReact && !hasPkg && projectDir) {
+      // Scan the project for ALL JS files (not just modified ones) to get full
+      // getElementById picture. This catches cases where script.js was broken in a
+      // prior coder round but only a .ts file was written in the current round.
+      let projectJsFiles = [];
+      try {
+        const entries = await fs.promises.readdir(projectDir, { recursive: false });
+        projectJsFiles = entries
+          .filter(e => /\.m?js$/i.test(e))
+          .map(e => path.join(projectDir, e));
+      } catch { /* skip */ }
+      // Also include any modified .js files from subdirs
+      const modifiedJsFiles = allFiles.filter(f => /\.m?js$/i.test(f) && !f.includes("node_modules"));
+      const jsFiles = [...new Set([...projectJsFiles, ...modifiedJsFiles])];
 
-      if (indexHtml) {
-        const htmlExists = await fs.promises.access(indexHtml).then(() => true).catch(() => false);
+      {
+        const htmlExists = true; // already checked indexHtmlExists above
         if (htmlExists) {
           // Collect all getElementById("X") literal IDs from JS files
-          const jsFiles = allFiles.filter(f => /\.m?js$/i.test(f) && !f.includes("node_modules"));
           const referencedIds = new Set();
           for (const relPath of jsFiles) {
             const absPath = path.isAbsolute(relPath) ? relPath : path.join(projectDir, relPath);
@@ -2648,16 +2676,31 @@ Do NOT output [] without reading the JS module first. The verifier checks your r
             } catch { /* skip */ }
           }
 
-          if (referencedIds.size > 0) {
-            try {
+          // Always run the headless gate for vanilla HTML projects — even if no getElementById
+          // references were found. This catches stub JS files that have no DOM calls but still
+          // break the page (e.g. missing game logic that the HTML entry point expects).
+          try {
               const { chromium } = await import("playwright-core");
               const browser = await chromium.launch({ headless: true });
               const page = await browser.newPage();
               const consoleErrors = [];
               page.on("console", msg => {
-                if (msg.type() === "error") consoleErrors.push(msg.text());
+                if (msg.type() === "error") {
+                  const loc = msg.location();
+                  const file = loc?.url ? loc.url.replace(/^.*\//, "") : "";
+                  const lineNo = loc?.lineNumber ?? "";
+                  const locStr = file ? ` (${file}:${lineNo})` : "";
+                  consoleErrors.push(msg.text() + locStr);
+                }
               });
-              page.on("pageerror", err => consoleErrors.push(err.message));
+              page.on("pageerror", err => {
+                const stack = err.stack || "";
+                const match = stack.match(/\(([^)]+):(\d+):\d+\)/);
+                const file = match ? match[1].replace(/^.*\//, "") : "";
+                const lineNo = match ? match[2] : "";
+                const locStr = file ? ` (${file}:${lineNo})` : "";
+                consoleErrors.push(err.message + locStr);
+              });
 
               await page.goto(`file://${indexHtml}`, { timeout: 6000 }).catch(() => {});
               await page.waitForTimeout(500);
@@ -2693,7 +2736,15 @@ For each missing id: the JavaScript calls \`document.getElementById("X")\` but n
 - Adding \`id="X"\` to the correct HTML element in index.html, OR
 - Changing the JavaScript to match the id that already exists in the HTML.
 
-Fix ALL missing ids before this subtask can pass.`,
+Fix ALL missing ids and console errors before this subtask can pass.
+
+IMPORTANT: Browser console errors (shown above with filename:line) mean a JavaScript syntax error. The error location tells you EXACTLY which file to fix — read that file, find that line, and fix the syntax. DO NOT modify TypeScript files or unrelated files.
+
+CRITICAL — Template literal backticks are stripped by this environment. If the error is "Unexpected token '{'" or similar, the root cause is stripped backticks. DO NOT use template literals. Use string concatenation instead:
+  WRONG:  'card-' + \`\${rank}_of_\${suit}\`   (backtick string will be stripped)
+  RIGHT:  'card-' + rank + '_of_' + suit
+
+Replace ALL template literals in the broken .js file with string concatenation, then rewrite the entire file using write_file.`,
                   }],
                 };
               }
@@ -2701,7 +2752,6 @@ Fix ALL missing ids before this subtask can pass.`,
             } catch (e) {
               log(colors.dim(`  [Verifier] Headless render check skipped: ${e.message?.slice(0, 80)}`));
             }
-          }
         }
       }
     }

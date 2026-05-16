@@ -19,6 +19,7 @@ export function createLoopState({
   send,
   requireWriteFile,
   requireTools = false,
+  providerName = null,
 }) {
   const state = {
     remoteSessionId,
@@ -28,6 +29,7 @@ export function createLoopState({
     send,
     requireWriteFile,
     requireTools,
+    providerName,
     maxSteps: 20,
 
     responseText: initialResponseText || "",

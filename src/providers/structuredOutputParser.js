@@ -104,9 +104,11 @@ export class StructuredOutputParser {
 
     // Strategy 0: TASK_DONE / [] — explicit completion signals.
     // TASK_DONE is the new preferred signal. [] is kept for backwards compatibility.
-    // Only apply when no JSON tool-call object is present.
+    // Only apply when no JSON tool-call object is present AND no <<<FILE:>>> blocks
+    // (Copilot uses <<<FILE:>>> instead of JSON tool calls — Strategy 7 handles those).
     const hasToolCallObject = /"tool"\s*:/.test(text) || /"name"\s*:/.test(text);
-    if (!hasToolCallObject && (/\bTASK_DONE\b/.test(text) || /\[\s*\]/.test(text))) {
+    const hasCopilotFileBlocks = text.includes("<<<FILE:");
+    if (!hasToolCallObject && !hasCopilotFileBlocks && (/\bTASK_DONE\b/.test(text) || /\[\s*\]/.test(text))) {
       return { success: true, actions: [], error: null };
     }
 
@@ -240,6 +242,54 @@ export class StructuredOutputParser {
         }
       } catch {
         // jsonrepair can't fix everything — fall through to final error.
+      }
+    }
+
+    // Strategy 7: <<<FILE: path>>> ... <<<END FILE>>> blocks — Copilot-native format.
+    // Copilot may omit <<<END FILE>>> or put the content on the same line as >>>.
+    // Three passes to maximise compatibility:
+    //   7a. strict: <<<END FILE>>> terminator present
+    //   7b. relaxed: terminated by next <<<FILE:, TASK_DONE, or end-of-string
+    //   7c: content on the same line as the >>> (no newline)
+    if (text.includes("<<<FILE:")) {
+      const fileBlocks = [];
+      // Reject paths that are clearly placeholders: "...", relative, or non-absolute.
+      const isPlaceholderPath = (fp) =>
+        !fp || !fp.startsWith("/") || /^\.*$/.test(fp) || fp.trim() === "...";
+
+      // 7a: strict — <<<END FILE>>> present
+      {
+        const re = /<<<FILE:\s*([^\n>]+?)[ \t]*>>>\r?\n([\s\S]*?)<<<END FILE>>>/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const fp = m[1].trim();
+          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: m[2] });
+        }
+      }
+
+      // 7b: relaxed — no <<<END FILE>>>, terminated by next block or TASK_DONE
+      if (fileBlocks.length === 0) {
+        const re = /<<<FILE:\s*([^\n>]+?)[ \t]*>>>\r?\n([\s\S]*?)(?=<<<FILE:|TASK_DONE\b|$)/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const fp = m[1].trim();
+          const content = m[2].replace(/\n?<<<END FILE>>>\s*$/, "").replace(/\n?TASK_DONE\s*$/, "");
+          if (fp && content && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content });
+        }
+      }
+
+      // 7c: content on same line as >>> (Copilot sometimes skips the newline)
+      if (fileBlocks.length === 0) {
+        const re = /<<<FILE:\s*([^\n>]+?)[ \t]*>>>[ \t]+([^\n].+?)(?:<<<END FILE>>>|TASK_DONE\b|$)/gs;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const fp = m[1].trim();
+          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: m[2] });
+        }
+      }
+
+      if (fileBlocks.length > 0) {
+        return { success: true, actions: fileBlocks, error: null };
       }
     }
 

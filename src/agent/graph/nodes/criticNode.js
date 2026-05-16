@@ -72,6 +72,7 @@ Specific patterns to always check for:
 - Template dual-rendering: if any subtask adds a conditional rendering block to a template, check whether the plan also explicitly DELETES the existing unconditional rendering line. If not, flag it: "Subtask N adds the new block but does not remove the old $Content line — both will render simultaneously."
 - Acceptance test semantic weakness: if the acceptance test only checks HTTP 200 or "no errors", flag it: "Acceptance test verifies rendering is error-free but does NOT verify the feature-specific markup is present. Add a grep/search for the specific HTML class or element."
 - Acceptance test URL format: if the plan mentions a local dev URL, check it uses the correct format (not http://localhost if the site runs on a named vhost).
+- Game logic test coverage: if building any game (board game, card game, puzzle), check that the acceptance test covers ALL of: (a) every piece/unit type's legal AND illegal moves, (b) win/loss end conditions, (c) domain-specific edge cases (pawn promotion and en-passant for chess; multi-jump for checkers; etc.), (d) UI state machine transitions (select a piece → re-select a different piece → deselect → make invalid move → make valid move → turn switches). A test suite that only checks "pawn moves forward one square" while omitting promotion, capture, and turn-enforcement is a coverage gap that WILL produce a buggy game. Flag: "Acceptance test does not cover [specific missing case] — add a test for it."
 
 Rules:
 - Be specific: name exact subtask IDs, file paths, class names
@@ -91,6 +92,13 @@ export async function criticNode(state, config) {
   }
 
   if (!state.model && !state.provider) {
+    return { criticCompleted: true, currentPersona: PERSONA.id };
+  }
+
+  // Skip for chunked providers — saves a Copilot quota call with minimal benefit.
+  const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+  if (isChunkedProvider) {
+    log(colors.dim(`  [Graph] -> Adversarial Critic: skipping for chunked provider`));
     return { criticCompleted: true, currentPersona: PERSONA.id };
   }
 
@@ -154,7 +162,7 @@ export async function criticNode(state, config) {
   }
 
   // Count bullet-pointed or numbered risk items — support -, •, *, and numbered lists.
-  const riskCount = (raw.match(/^[-•*]|\b^\d+\./gm) || []).length;
+  const riskCount = (raw.match(/^[-•*]|^\d+\./gm) || []).length;
   log(colors.yellow(`  [Graph] -> Critic: ${riskCount} risks identified`));
   eventBus.emit("system_message", {
     text: `⚡ Critic review: ${riskCount} risk${riskCount !== 1 ? "s" : ""} flagged for coder awareness`,

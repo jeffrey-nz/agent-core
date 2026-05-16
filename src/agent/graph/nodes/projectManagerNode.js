@@ -1,5 +1,7 @@
 import { generateText } from "ai";
 import { jsonrepair } from "jsonrepair";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { detectProjectContext } from "#utils/detectProjectContext.js";
 import { buildTddDirective } from "#utils/projectDirectives.js";
 import { renderMemoryIndex } from "#memory/loader.js";
@@ -321,7 +323,7 @@ Each subtask MUST include:
 - "constraints": method signatures, class names, import paths, migration notes from scope
 
 CRITICAL RULES:
-- File paths MUST come from the Scope Document - do NOT invent paths
+- File paths SHOULD come from the Scope Document. If the Scope Document lacks specific paths, use the PROJECT FILES list (provided at the end of the scope message) or the Research Report to infer reasonable file paths — never refuse to plan just because file paths are missing from the scope
 - Every subtask must specify exact file(s) in both "task" and "files"
 - "implementation_note" is MANDATORY - a coder reading only this note must know exactly what to write
 - Subtasks must result in concrete file changes only; keep them small and isolated
@@ -548,22 +550,60 @@ The prompt already specifies the exact file, exact line, and exact change needed
   // consecutive parse-error retries instead of completing normally.
   const isDegenerate = (v) => !v || /^\[\]$/.test(v.trim()) || v.trim().length < 20;
 
-  /** @type {import('ai').ModelMessage[]} */
-  const planningMessages = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: `ORIGINAL TASK:\n${state.messages[0]?.content || ""}` },
-    ...(state.intentDocument
-      ? [{ role: "user", content: `INTENT ANALYSIS (use success criteria to ensure plan is complete):\n${state.intentDocument}` }]
-      : []),
-    ...(state.refinedResearch
-      ? [{ role: "user", content: `REFINED RESEARCH (condensed key facts — implementation focus):\n${state.refinedResearch}` }]
-      : []),
-    { role: "user", content: `FULL RESEARCH REPORT (key findings):\n${isDegenerate(state.researchSummary) ? (isDegenerate(state.researchContext) ? "(none)" : state.researchContext.slice(0, 3000)) : state.researchSummary}` },
-    {
-      role: "user",
-      content: `SCOPE DOCUMENT (authoritative - use file paths from here):\n${isDegenerate(state.scopeDocument) ? "(Scoper produced no output - fall back to Research Report paths)" : state.scopeDocument}`,
-    },
-  ];
+  // Build a compact fallback file list — always include so PM has ground-truth file names.
+  // Inlined into the scope message (not a separate turn) to avoid Copilot context overflow.
+  let fallbackFileListing = "";
+  if (state.projectDir) {
+    try {
+      const entries = await fs.readdir(state.projectDir, { recursive: false });
+      const rootFiles = entries
+        .filter(e => !e.startsWith(".") && e !== "node_modules" && e !== "docs")
+        .slice(0, 20);
+      if (rootFiles.length > 0) {
+        fallbackFileListing = `\n\nPROJECT FILES (use these exact paths when specifying files in subtasks):\n${rootFiles.join(", ")}`;
+      }
+    } catch { /* skip */ }
+  }
+
+  // Chunked providers (Copilot, 9500-char limit): the full 29K systemPrompt requires
+  // 4 chunks per PM attempt. These providers consistently fail on large multi-chunk PM
+  // prompts. Use a compact system prompt + task-only messages that fit in 1-2 chunks.
+  const isChunkedProviderForPM = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+  let planningMessages;
+  if (isChunkedProviderForPM) {
+    const minimalSystemPrompt =
+      `You are a Project Manager. Break the task into 1-3 focused subtasks.\n` +
+      `Output ONLY a raw JSON object (no markdown, no prose) with exactly these keys:\n` +
+      `{ "plan": "one-line summary", "subtasks": [ { "task": "...", "implementationNote": "...", "files": ["path/to/file"], "acceptanceCriteria": "...", "failureCriteria": "..." } ] }\n` +
+      `Rules:\n` +
+      `- Each subtask must name specific files (relative paths, e.g. script.js)\n` +
+      `- "task" field: ≤150 chars summarizing what to change\n` +
+      `- "implementationNote": full detail on HOW to make the change\n` +
+      `- Output ONLY the JSON object, nothing else`;
+    const taskText = state.messages[0]?.content || "Fix the bug described in the task";
+    planningMessages = [
+      { role: "system", content: minimalSystemPrompt },
+      { role: "user", content: `TASK:\n${taskText}${fallbackFileListing}` },
+    ];
+    log(colors.dim(`  [Graph] -> PM: using minimal prompt for chunked provider (~${(minimalSystemPrompt.length + taskText.length).toLocaleString()} chars)`));
+  } else {
+    /** @type {import('ai').ModelMessage[]} */
+    planningMessages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `ORIGINAL TASK:\n${state.messages[0]?.content || ""}` },
+      ...(state.intentDocument
+        ? [{ role: "user", content: `INTENT ANALYSIS (use success criteria to ensure plan is complete):\n${state.intentDocument}` }]
+        : []),
+      ...(state.refinedResearch
+        ? [{ role: "user", content: `REFINED RESEARCH (condensed key facts — implementation focus):\n${state.refinedResearch}` }]
+        : []),
+      { role: "user", content: `FULL RESEARCH REPORT (key findings):\n${isDegenerate(state.researchSummary) ? (isDegenerate(state.researchContext) ? "(none)" : state.researchContext.slice(0, 3000)) : state.researchSummary}` },
+      {
+        role: "user",
+        content: `SCOPE DOCUMENT (authoritative - use file paths from here):\n${isDegenerate(state.scopeDocument) ? `(Scoper produced no output - fall back to Research Report paths)` : state.scopeDocument}${fallbackFileListing}`,
+      },
+    ];
+  }
 
   const signal = config?.signal ?? null;
   const MAX_PLAN_ATTEMPTS = 3;
@@ -618,6 +658,15 @@ The prompt already specifies the exact file, exact line, and exact change needed
       lastAttemptError = new Error("Project Manager returned empty response (provider stall)");
       log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: empty response - will retry`));
       continue;
+    }
+
+    // Detect provider service errors (rate limit / service outage).
+    // When the provider returns this, all retries will also fail — break
+    // immediately so the fallback synthesizes a plan without burning quota.
+    if (/we are experiencing an issue/i.test(planText) || /please try submitting a new message/i.test(planText)) {
+      lastAttemptError = new Error("Provider service error (rate-limited or service outage)");
+      log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: provider service error — breaking retry loop`));
+      break;
     }
 
     let parsed = null;
@@ -848,19 +897,24 @@ The prompt already specifies the exact file, exact line, and exact change needed
     const reason = lastAttemptError?.message ?? "unknown error";
     log(colors.red(`  [Graph] -> Project Manager: all ${MAX_PLAN_ATTEMPTS} attempts failed — ${reason}`));
 
-    // direct_fix: PM is redundant — the prompt already names the exact file and change.
-    // Synthesize a single subtask from the original task rather than blocking the session.
-    if (state.taskType === "direct_fix") {
+    // direct_fix / quick_edit: PM is redundant — the prompt already names the exact files.
+    // Synthesize subtasks from the original task rather than blocking the session.
+    // Also applies to chunked providers (e.g. Copilot) that can't handle large PM prompts.
+    const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+    if (state.taskType === "direct_fix" || state.taskType === "quick_edit" || isChunkedProvider) {
       const originalTask = state.messages[0]?.content || "Fix the bug described in the task";
-      const fileHint = state.benchmarkScenarioId
-        ? originalTask.match(/\b[\w/-]+\.(?:js|ts|py|rb|go|php|java|cs|cpp|c|rs)\b/)?.[0] || ""
-        : "";
-      log(colors.yellow(`  [Graph] -> direct_fix fallback: synthesizing single subtask from prompt`));
+      // Extract all referenced file paths from the task description.
+      const fileMatches = [...new Set(
+        (originalTask.match(/\b[\w./-]+\.(?:js|ts|jsx|tsx|css|html|py|rb|go|php|java|cs|cpp|c|rs)\b/g) || [])
+          .filter((f) => !f.startsWith(".") && f.length < 60)
+      )];
+      const files = fileMatches.length > 0 ? fileMatches : [];
+      log(colors.yellow(`  [Graph] -> PM fallback: synthesizing subtask from prompt (files: ${files.join(", ") || "none"})`));
       return {
         subtasks: [{
-          task: originalTask.slice(0, 200),
+          task: originalTask.slice(0, 500),
           implementationNote: originalTask,
-          files: fileHint ? [fileHint] : [],
+          files,
           acceptanceCriteria: "Implementation matches the fix described in the task",
           failureCriteria: "N/A",
         }],

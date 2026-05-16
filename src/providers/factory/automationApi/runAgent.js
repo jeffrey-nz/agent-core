@@ -19,6 +19,7 @@ export async function runAutomationAgent({
     toolContext,
     label,
     initialResponseText,
+    providerName: state.providerName ?? null,
     send: async (sid, text, lbl) => {
       const result = await sendRemoteTurn(sid, text, lbl, signal);
       state.messageCount = result.messageCount ?? state.messageCount ?? 0;
