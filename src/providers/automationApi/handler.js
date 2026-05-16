@@ -53,6 +53,14 @@ export class AutomationApiHandler {
       return { ok: true, text: responseText, toolCalls };
     } catch (error) {
       log(colors.red(`  [Automation API Error] ${error.message}`));
+      // On any non-busy error, discard the remote session ID so the next call
+      // opens a fresh bridge session rather than retrying the broken/expired tab.
+      if (!error.isBusy) {
+        if (this.remoteSessionId) {
+          await deleteRemoteSession(this.remoteSessionId).catch(() => {});
+          this.remoteSessionId = null;
+        }
+      }
       return { ok: false, reason: error.message };
     }
   }
