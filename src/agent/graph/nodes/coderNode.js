@@ -424,7 +424,7 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
 
   logFn(colors.dim(`  [Graph] -> Nuclear result text preview: ${nuclearText.slice(0, 250).replace(/\n/g, "↵")}`));
 
-  const ncbExtMap = { css: '.css', js: '.js', javascript: '.js', html: '.html' };
+  const ncbExtMap = { css: '.css', js: '.js', javascript: '.js', html: '.html', gd: '.gd', gdscript: '.gd', tscn: '.tscn' };
   let extracted = false;
 
   // 1. Try fenced code blocks first (```css, ```js, etc.)
@@ -453,15 +453,17 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
   // but sometimes leaving the language name (e.g. "css\n/* styles */" or
   // "javascript\nconst ..."). Strip the language prefix before matching.
   const rawText = nuclearText.trim();
-  const langPrefixMatch = rawText.match(/^(css|javascript|js|html)\n([\s\S]+)/i);
+  const langPrefixMatch = rawText.match(/^(css|javascript|js|html|gd|gdscript|tscn)\n([\s\S]+)/i);
   const textToCheck = langPrefixMatch ? langPrefixMatch[2] : rawText;
   const detectedLang = langPrefixMatch ? langPrefixMatch[1].toLowerCase() : null;
 
-  // If a fenced-block language prefix was found, use it directly (CSS or JS)
+  // If a fenced-block language prefix was found, use it directly
   if (langPrefixMatch && textToCheck.length > 100) {
     const isCssLang = detectedLang === "css";
     const isJsLang = detectedLang === "js" || detectedLang === "javascript";
-    const ext3 = isCssLang ? ".css" : isJsLang ? ".js" : null;
+    const isGdLang = detectedLang === "gd" || detectedLang === "gdscript";
+    const isTscnLang = detectedLang === "tscn";
+    const ext3 = isCssLang ? ".css" : isJsLang ? ".js" : isGdLang ? ".gd" : isTscnLang ? ".tscn" : null;
     if (ext3) {
       const target3 = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ext3);
       if (target3) {
@@ -486,8 +488,24 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
     /^(?:\/\*|body\s*\{|html\s*\{|:root\s*\{|\*\s*\{|\.[a-zA-Z]|\#[a-zA-Z]|@import|@keyframes)/.test(textToCheck);
   const looksLikeJs = textToCheck.length > 300 && textToCheck.includes("{") && textToCheck.includes("}") &&
     /\b(?:const|let|var|function|class|return|if\s*\(|addEventListener|document\.|window\.)\b/.test(textToCheck);
+  const looksLikeGdScript = textToCheck.length > 100 &&
+    /^(?:extends\s+\w|@export|func\s+\w|var\s+\w|signal\s+\w|const\s+\w|class_name\s+\w|\[gd_scene\]|\[node)/.test(textToCheck.trim());
 
-  if (looksLikeCss) {
+  if (looksLikeGdScript) {
+    // Determine extension: .tscn for scene data, .gd for scripts
+    const isTscnContent = /^\[gd_scene\]/.test(textToCheck.trim());
+    const gdExt = isTscnContent ? ".tscn" : ".gd";
+    const gdTarget = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === gdExt);
+    if (gdTarget) {
+      const absGdTarget = path.isAbsolute(gdTarget) ? gdTarget : path.join(projectDir, gdTarget);
+      try {
+        await writeFile(absGdTarget, textToCheck.trim());
+        logFn(colors.green(`  [Graph] -> Nuclear raw-GDScript extraction (${gdExt}): wrote ${textToCheck.length} chars to ${path.basename(absGdTarget)}`));
+        modifiedFiles.push(absGdTarget);
+        extracted = true;
+      } catch (_) {}
+    }
+  } else if (looksLikeCss) {
     const target = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ".css");
     if (target) {
       const absTarget = path.isAbsolute(target) ? target : path.join(projectDir, target);
@@ -1323,6 +1341,16 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
     // until this subtask completes to avoid mid-subtask context loss.
     state.provider?.setSubtaskActive?.(true);
 
+    const _provName = state.provider?.providerName || "unknown";
+    const _subIdx = (state.currentSubtaskIndex || 0) + 1;
+    const _subTotal = state.subtasks?.length || 1;
+    eventBus.emit("session_role_update", {
+      role: "primary", status: "active",
+      provider: _provName,
+      task: `coding ${_subIdx}/${_subTotal}`,
+    });
+    log(colors.dim(`  [Sessions] primary active · ${_provName} · coding ${_subIdx}/${_subTotal}`));
+
     let result;
     try {
       result = await state.provider.sendTurn(messages, "coder", context);
@@ -1546,6 +1574,12 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
           const originalTask = state.messages?.[0]?.content?.slice(0, 800) || "";
 
           log(colors.yellow(`  [Graph] -> Nuclear retry: ${isLimitedOutputProvider ? "DeepSeek" : "chunked"} provider — fresh session, conversational prompt`));
+          eventBus.emit("session_role_update", {
+            role: "auxiliary", status: "active",
+            provider: _provName,
+            task: "nuclear retry",
+          });
+          log(colors.dim(`  [Sessions] auxiliary active · ${_provName} · nuclear retry`));
           try {
             await state.provider.startNewChat?.();
           } catch (_) { /* ignore */ }
@@ -1668,6 +1702,8 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         try {
           const nuclearResult = await state.provider.sendTurn(nuclearMessages, "nuclear", nuclearContext);
           await handleNuclearResult(nuclearResult);
+          eventBus.emit("session_role_update", { role: "auxiliary", status: "idle" });
+          log(colors.dim(`  [Sessions] auxiliary idle`));
 
           // ── Truncation continuation (DeepSeek) ─────────────────────────────
           // DeepSeek caps responses at ~3000 chars. After nuclear writes a JS file,

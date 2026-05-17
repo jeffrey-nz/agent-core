@@ -84,6 +84,11 @@ export async function intentNode(state, config) {
     description: "Analysing user intent — defining goal, success criteria, constraints",
   });
   eventBus.emit("phase_change", { phase: PERSONA.phase, label: "Defining intent..." });
+  eventBus.emit("session_role_update", {
+    role: "primary", status: "active",
+    provider: state.provider?.providerName || "unknown",
+    task: "planning",
+  });
 
   const signal = config?.signal ?? null;
   let raw = "";

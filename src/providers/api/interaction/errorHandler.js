@@ -45,6 +45,15 @@ export async function handleApiError(res, sessionId) {
     );
   }
 
+  // Playwright browser tab was closed externally — equivalent to session expiry.
+  // Map to SESSION_EXPIRED so runAutomationApiTurn's recovery path fires.
+  if (
+    err.error?.includes("Target page, context or browser has been closed") ||
+    (err.error?.includes("page") && err.error?.includes("closed"))
+  ) {
+    throw new Error(`SESSION_EXPIRED: Browser tab was closed. ${err.error}`);
+  }
+
   throw new Error(err.error || `HTTP ${res.status}`);
 }
 

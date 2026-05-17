@@ -108,6 +108,11 @@ export async function criticNode(state, config) {
     description: "Red-teaming the execution plan to surface hidden risks before coding",
   });
   eventBus.emit("phase_change", { phase: PERSONA.phase, label: "Critiquing plan..." });
+  eventBus.emit("session_role_update", {
+    role: "primary", status: "active",
+    provider: state.provider?.providerName || "unknown",
+    task: "critique",
+  });
 
   const signal = config?.signal ?? null;
 

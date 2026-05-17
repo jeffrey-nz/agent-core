@@ -186,6 +186,8 @@ async function commitVerifiedSubtask(projectDir, taskLabel) {
     const safeLabel = taskLabel.replace(/["`$\\]/g, "'").slice(0, 72);
     await execAsync(`git commit -m "${safeLabel}"`, { cwd: projectDir });
     log(colors.dim(`  [Graph] -> Committed verified subtask: ${safeLabel}`));
+    eventBus.emit("session_role_update", { role: "primary", status: "idle" });
+    log(colors.dim(`  [Sessions] primary idle`));
   } catch (e) {
     log(
       colors.yellow(`  [Graph] -> Could not auto-commit subtask: ${e.message}`),
@@ -2162,39 +2164,51 @@ DEBUGGING STRATEGY:
     const subtaskFilesForAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.files;
     const sessionWritten = new Set(state.allModifiedFiles || []);
     if (Array.isArray(subtaskFilesForAutoPass) && subtaskFilesForAutoPass.length > 0 && sessionWritten.size > 0) {
-      const allWrittenByAgent = subtaskFilesForAutoPass.every((f) => {
-        const norm = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
-        return sessionWritten.has(f) || sessionWritten.has(norm) ||
-          Array.from(sessionWritten).some((w) => w.endsWith(f) || f.endsWith(path.basename(w)));
-      });
-      if (allWrittenByAgent) {
-        // Suppress auto-pass when the previously-written JS file(s) are too small
-        // (< 800 chars) — a skeleton written by an earlier subtask should not
-        // block a later subtask that needs to add full game/app logic.
-        let hasMinimalJsFile = false;
-        for (const f of subtaskFilesForAutoPass) {
-          const ext = path.extname(f).toLowerCase();
-          if (![".js", ".ts", ".jsx", ".tsx"].includes(ext)) continue;
-          const abs = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
-          try {
-            const content = fs.readFileSync(abs, "utf-8");
-            if (content.length < 800) { hasMinimalJsFile = true; break; }
-          } catch {
-            // File doesn't exist — suppress auto-pass so the coder actually writes it.
-            hasMinimalJsFile = true; break;
+      // Suppress auto-pass if all planned files are pure config files (e.g. project.godot,
+      // package.json) — these appear in every subtask's plan when the AI lacks output budget,
+      // causing every subsequent subtask to falsely auto-pass without writing the real game files.
+      const CONFIG_ONLY_FILES = /^(project\.godot|package\.json|tsconfig\.json|vite\.config\.[tj]s|\.gitignore|icon\.svg)$/i;
+      const hasOnlyConfigFiles = subtaskFilesForAutoPass.every(f => CONFIG_ONLY_FILES.test(path.basename(f)));
+      const currentSubtaskTask = String(state.subtasks?.[state.currentSubtaskIndex]?.task || "");
+      const isImplementationTask = /\b(implement|create|add|write|build|enemy|spawner|player|weapon|shop|hud|wave|score|ui)\b/i.test(currentSubtaskTask);
+      if (hasOnlyConfigFiles && isImplementationTask) {
+        log(colors.yellow(`  [Graph] -> Auto-pass suppressed: planned files are config-only but subtask is an implementation task — forcing coder to write actual files.`));
+        // Fall through to the normal no-files-written retry path below.
+      } else {
+        const allWrittenByAgent = subtaskFilesForAutoPass.every((f) => {
+          const norm = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
+          return sessionWritten.has(f) || sessionWritten.has(norm) ||
+            Array.from(sessionWritten).some((w) => w.endsWith(f) || f.endsWith(path.basename(w)));
+        });
+        if (allWrittenByAgent) {
+          // Suppress auto-pass when the previously-written JS/GDScript file(s) are too small
+          // (< 800 chars) — a skeleton written by an earlier subtask should not
+          // block a later subtask that needs to add full game/app logic.
+          let hasMinimalSourceFile = false;
+          for (const f of subtaskFilesForAutoPass) {
+            const ext = path.extname(f).toLowerCase();
+            if (![".js", ".ts", ".jsx", ".tsx", ".gd"].includes(ext)) continue;
+            const abs = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
+            try {
+              const content = fs.readFileSync(abs, "utf-8");
+              if (content.length < 800) { hasMinimalSourceFile = true; break; }
+            } catch {
+              // File doesn't exist — suppress auto-pass so the coder actually writes it.
+              hasMinimalSourceFile = true; break;
+            }
           }
-        }
-        if (hasMinimalJsFile) {
-          log(colors.yellow(`  [Graph] -> Auto-pass suppressed: planned JS file(s) have minimal content (<800 chars) — letting coder add full implementation.`));
-          // Fall through to the normal no-files-written retry path below.
-        } else {
-          log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) were already modified by the agent this session — auto-passing subtask.`));
-          emitTaskCompleted(state);
-          const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
-          await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
-          await closeSubIssueForSubtask(state);
-          writeVerificationMarker();
-          return { verifierFeedback: "PASS" };
+          if (hasMinimalSourceFile) {
+            log(colors.yellow(`  [Graph] -> Auto-pass suppressed: planned source file(s) have minimal content (<800 chars) — letting coder add full implementation.`));
+            // Fall through to the normal no-files-written retry path below.
+          } else {
+            log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) were already modified by the agent this session — auto-passing subtask.`));
+            emitTaskCompleted(state);
+            const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
+            await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
+            await closeSubIssueForSubtask(state);
+            writeVerificationMarker();
+            return { verifierFeedback: "PASS" };
+          }
         }
       }
     }
@@ -2394,7 +2408,10 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
 
   // Godot GDScript syntax gate: for Godot projects, run --check-only after any .gd changes.
   // Equivalent to the Swift swiftc -typecheck gate. TypeScript/npm-build gates don't apply.
-  if (state.projectType === "godot") {
+  // Fallback: also activate if project.godot exists on disk and state.projectType wasn't set.
+  const isGodotOnDisk = state.projectDir &&
+    await fs.promises.access(path.join(state.projectDir, "project.godot")).then(() => true).catch(() => false);
+  if (state.projectType === "godot" || (isGodotOnDisk && (state.projectType === "unknown" || !state.projectType))) {
     // Extension guard: reject hallucinated non-Godot files (.js, .html, .ts, etc.)
     const GODOT_OK_EXT = /\.(gd|json|tscn|tres|md|cfg|import|png|svg|wav|ogg|ttf)$/i;
     const NON_GODOT_CODE = /\.(js|ts|jsx|tsx|html|css|py|cs|cpp|rb|php|sh|vue|java)$/i;
@@ -2415,7 +2432,47 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
 
     const hasGdFiles = (state.modifiedFiles || []).some((f) => f.endsWith(".gd"));
     if (hasGdFiles) {
+      // Truncation guard: detect .gd files whose content ends mid-statement (DeepSeek output cutoff).
+      // Check before Godot syntax check so we catch it even without a Godot binary.
+      const DANGLING_RE = /[=,+\-*/%|&^~<>({\[][\s]*$/;
+      const OPEN_BRACKET_RE = /[({[]/g;
+      const CLOSE_BRACKET_RE = /[)}\]]/g;
+      const gdFilesWritten = (state.modifiedFiles || []).filter((f) => f.endsWith(".gd"));
+      for (const gdFile of gdFilesWritten) {
+        try {
+          const content = fs.readFileSync(gdFile, "utf8");
+          const lastLine = content.trimEnd().split("\n").pop() || "";
+          const openCount = (content.match(OPEN_BRACKET_RE) || []).length;
+          const closeCount = (content.match(CLOSE_BRACKET_RE) || []).length;
+          const hasDanglingOp = DANGLING_RE.test(lastLine);
+          const hasUnclosedBrackets = openCount > closeCount + 3; // +3 tolerance for TSCN-style
+          const isTooShort = content.trim().split("\n").length < 5;
+          if (hasDanglingOp || hasUnclosedBrackets || isTooShort) {
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            const reason = hasDanglingOp ? `ends with incomplete expression: "${lastLine.trim()}"` :
+              hasUnclosedBrackets ? `unclosed brackets (${openCount} open, ${closeCount} close)` :
+              "file appears empty or stub";
+            log(colors.red(`  [Verifier] GDScript truncation detected in ${path.basename(gdFile)}: ${reason}`));
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — TRUNCATED GDSCRIPT FILE]\n\n${path.basename(gdFile)} was written but appears TRUNCATED (${reason}).\n\nThe file content was cut off before the script was complete. You MUST rewrite the ENTIRE file using write_file with complete, valid GDScript. Do NOT stop mid-statement.\n\nCurrent subtask: ${currentTask}`,
+              }],
+            };
+          }
+        } catch { /* file unreadable — other gates handle missing files */ }
+      }
+
       const godotBin = process.env.GODOT_BIN || "/mnt/c/Users/Work/Godot_v4.6.2-stable_win64.exe/Godot_v4.6.2-stable_win64_console.exe";
+      // First check if Godot binary exists — if not, skip syntax check gracefully
+      // rather than treating "binary not found" as a script error.
+      const godotBinExists = await execAsync(`test -f "${godotBin}" || which godot 2>/dev/null`)
+        .then(() => true).catch(() => false);
+      if (!godotBinExists) {
+        log(colors.dim("  [Verifier] Godot binary not found — skipping GDScript syntax check (set GODOT_BIN env to enable)."));
+      } else {
       const winPath = state.projectDir?.replace(/^\/mnt\/c\//i, "C:/") || state.projectDir;
       log(colors.dim("  [Verifier] Running GDScript syntax check (Godot --check-only)..."));
 
@@ -2425,8 +2482,11 @@ ${currentTask}${fileHint}${lineRangeHint}${implNoteHint}${fsStateHint}${proseWar
       ).catch((e) => e);
 
       const checkOut = ((checkRes?.stdout || "") + (checkRes?.stderr || "")).trim();
+      // Only report errors if binary actually ran (non-empty output or explicit error patterns).
+      // A missing binary produces exit 127 with "not found" in stderr — don't treat that as a GDScript error.
+      const isBinaryMissing = /not found|no such file|command not found/i.test(checkOut);
       const hasScriptErrors =
-        (checkRes?.status ?? 0) !== 0 || /SCRIPT ERROR|Parse error|ERROR:/i.test(checkOut);
+        !isBinaryMissing && ((checkRes?.status ?? 0) !== 0 || /SCRIPT ERROR|Parse error|ERROR:/i.test(checkOut));
 
       if (hasScriptErrors) {
         const newRetryCount = (state.coderRetryCount ?? 0) + 1;
@@ -2463,6 +2523,7 @@ ${currentTask}${capWarning}`,
         };
       }
       log(colors.green("  [Graph] -> Verifier: GDScript syntax check passed."));
+      } // end if (godotBinExists)
     }
 
     // Stall check: if the subtask required specific files but the coder wrote nothing, fail.
@@ -2494,6 +2555,42 @@ ${currentTask}`,
         };
       }
       log(colors.yellow("  [Graph] -> Verifier: Godot coder wrote no files but at retry cap — force-passing."));
+    }
+
+    // Check that at least one planned source file was written this turn.
+    // "Planned source files" = non-config files listed in the subtask's files array.
+    // This catches the case where the coder only rewrote project.godot (a config file)
+    // for a subtask that was supposed to create a game script or scene.
+    // We do NOT require ALL planned files to be written because DeepSeek's ~3000 char
+    // output limit means the coder can only write one file per turn.
+    if (requiredFiles.length > 0 && state.projectDir) {
+      const SOURCE_EXT = /\.(gd|tscn|tres|gdshader)$/i;
+      const plannedSourceFiles = requiredFiles.filter(f => SOURCE_EXT.test(f));
+      if (plannedSourceFiles.length > 0) {
+        const writtenThisTurn = new Set(
+          (state.modifiedFiles || []).map(f => path.basename(f).toLowerCase())
+        );
+        const atLeastOneSourceWritten = plannedSourceFiles.some(f =>
+          writtenThisTurn.has(path.basename(f).toLowerCase())
+        );
+        if (!atLeastOneSourceWritten) {
+          const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+          const atCap = newRetryCount >= effectiveMaxRetries;
+          if (!atCap) {
+            log(colors.red(`  [Graph] -> Verifier: Godot coder only wrote config files but subtask requires source file(s) — retry ${newRetryCount}/${effectiveMaxRetries}.`));
+            eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: no planned .gd/.tscn file written`, type: "warning" });
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — WRONG FILES WRITTEN]\n\nYou wrote only config/existing files but the subtask requires creating a SOURCE file. The planned file(s) you must write:\n${plannedSourceFiles.map((f) => `  - ${f}`).join("\n")}\n\nWrite the FIRST planned source file using write_file now. Focus on ONE file per response.\n\nCURRENT SUBTASK:\n${currentTask}`,
+              }],
+            };
+          }
+          log(colors.yellow(`  [Graph] -> Verifier: Godot no source file written at retry cap — force-passing.`));
+        }
+      }
     }
 
     // Godot projects don't use TypeScript or npm — skip those gates and PASS.

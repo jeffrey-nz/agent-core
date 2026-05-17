@@ -64,11 +64,19 @@ export function createReviewer({ persona, personaKey, icon, description, label, 
 
     // --- Call provider -------------------------------------------------------
     const prompt = buildPrompt(state, fileBlocks);
+    eventBus.emit("session_role_update", {
+      role: "auxiliary", status: "active",
+      provider: state.provider?.providerName || "unknown",
+      task: label.toLowerCase(),
+    });
+    log(colors.dim(`  [Sessions] auxiliary active · ${state.provider?.providerName || "unknown"} · ${label.toLowerCase()}`));
     const result = await state.provider.sendTurn(
       [{ role: "user", content: prompt }],
       `${personaKey}-turn`,
       { requireWriteFile: false, interactionMode: "scoping", signal: config?.signal ?? null },
     );
+    eventBus.emit("session_role_update", { role: "auxiliary", status: "idle" });
+    log(colors.dim(`  [Sessions] auxiliary idle`));
 
     const text = result.text ?? "";
     const status = text.includes("VERDICT: FAIL") ? "FAIL" : "PASS";

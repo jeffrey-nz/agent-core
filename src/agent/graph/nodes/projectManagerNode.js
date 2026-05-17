@@ -615,6 +615,43 @@ The prompt already specifies the exact file, exact line, and exact change needed
   let reviewOnlyOverride = null; // injected on retry when plan has no file writes
   let jsonErrorOverride = null;  // injected on retry when JSON parse fails
 
+  // Fast-path: for DeepSeek (limited-output) + Godot new_project tasks, skip the PM
+  // entirely and use the hardcoded Godot fallback plan. DeepSeek's ~3000 char output
+  // limit means it can only generate 4-5 subtasks, which is not enough for a complete
+  // Godot game (needs 10+ files). Running 3 PM attempts would just waste 70+ seconds.
+  {
+    const isLimitedOutputProviderFastPath = state.provider?.providerName === "deepseek";
+    const fastPathOriginalTask = String(state.messages?.[0]?.content || "");
+    const isGodotFastPath = /\bgodot\b|\.tscn\b|\.gd\b|gdscript/i.test(fastPathOriginalTask);
+    if (isLimitedOutputProviderFastPath && isGodotFastPath && state.taskType === "new_project") {
+      log(colors.yellow("  [Graph] -> PM fast-path (Godot+DeepSeek): skipping LLM planning, using hardcoded Godot subtask plan"));
+      const note = fastPathOriginalTask.slice(0, 400);
+      const fastPathSubtasks = [
+        { task: "Create project.godot with input map and display config", implementationNote: "Godot 4 project config: app name, WASD input actions (move_left/right/up/down), 1280x720 viewport, GL compatibility renderer. Config version 5.", files: ["project.godot"], acceptanceCriteria: "project.godot exists with WASD input map", failureCriteria: "File missing or empty" },
+        { task: "Create scripts/player.gd with 8-dir movement, HP and death", implementationNote: "CharacterBody2D GDScript: speed=200, hp=100, take_damage(amount) method, _physics_process with Input.get_axis movement, death signal, gold tracking. Add to 'player' group.", files: ["scripts/player.gd"], acceptanceCriteria: "player.gd has move, take_damage, and death logic", failureCriteria: "Missing or empty" },
+        { task: "Create scenes/Player.tscn referencing scripts/player.gd", implementationNote: "CharacterBody2D scene: CollisionShape2D (CircleShape2D r=16), ColorRect 32x32 yellow for body, Label for HP display above player. Script=res://scripts/player.gd.", files: ["scenes/Player.tscn"], acceptanceCriteria: "Player.tscn references player.gd and has collision", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/enemy.gd for walker/runner/tank types", implementationNote: "CharacterBody2D GDScript: enemy_type='walker'|'runner'|'tank', matching speed/hp/damage values. Chase player with move_and_slide. take_damage, die signal, drop gold. Add to 'enemies' group.", files: ["scripts/enemy.gd"], acceptanceCriteria: "enemy.gd supports 3 types and chases player", failureCriteria: "Missing or empty" },
+        { task: "Create scenes/Enemy.tscn referencing scripts/enemy.gd", implementationNote: "CharacterBody2D scene with CollisionShape2D, ColorRect 28x28 (red=walker, orange=runner, purple=tank), HP bar ProgressBar above enemy. Script=res://scripts/enemy.gd.", files: ["scenes/Enemy.tscn"], acceptanceCriteria: "Enemy.tscn has collision and HP bar", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/enemy_spawner.gd for wave-based spawning", implementationNote: "Node GDScript: wave_number, enemies_per_wave. spawn_wave() instantiates Enemy.tscn at random arena-edge positions (arena 1200x680). Signals: wave_started, wave_cleared. Harder each wave.", files: ["scripts/enemy_spawner.gd"], acceptanceCriteria: "enemy_spawner.gd spawns enemies at arena edge per wave", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/weapon.gd for melee and ranged auto-attack", implementationNote: "Node GDScript: weapon_type='melee'|'ranged', damage, range, cooldown. _process finds nearest enemy in group, attacks on cooldown. Melee: direct damage. Ranged: queue Projectile.tscn.", files: ["scripts/weapon.gd"], acceptanceCriteria: "weapon.gd auto-attacks nearest enemy", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/projectile.gd for homing bullet logic", implementationNote: "Area2D bullet: speed=400, damage, homing to target, queue_free on hit or 3s lifetime. Uses move_toward for homing.", files: ["scripts/projectile.gd"], acceptanceCriteria: "projectile.gd moves toward enemy and deals damage", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/hud.gd for HP/wave/gold display", implementationNote: "CanvasLayer script: update_hp(cur,max), update_wave(n), update_gold(g), show_damage(amount, pos) methods using Labels and ProgressBar nodes.", files: ["scripts/hud.gd"], acceptanceCriteria: "hud.gd has HP/wave/gold display methods", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/shop.gd for upgrade purchases between waves", implementationNote: "CanvasLayer script: show_shop(gold), buy_hp(), buy_speed(), buy_damage(), buy_weapon(). Deducts gold, applies upgrades to player node. Emits shop_closed signal.", files: ["scripts/shop.gd"], acceptanceCriteria: "shop.gd handles gold purchases", failureCriteria: "Missing or empty" },
+        { task: "Create scripts/main.gd game manager and scenes/Main.tscn", implementationNote: "Node2D script: manages game state (playing/shop/game_over), connects wave_cleared→show_shop, player died→game_over. Main.tscn: Node2D with Player.tscn, EnemySpawner, HUD children.", files: ["scripts/main.gd"], acceptanceCriteria: "main.gd coordinates wave→shop→wave cycle", failureCriteria: "Missing or empty" },
+      ];
+      const detectedCtxFast = detectProjectContext(state.projectDir);
+      let resolvedTypeFast = detectedCtxFast.projectType;
+      if (resolvedTypeFast === "unknown") resolvedTypeFast = "godot";
+      return {
+        executionPlan: `Build Godot game: ${fastPathOriginalTask.slice(0, 100)}`,
+        subtasks: fastPathSubtasks,
+        currentSubtaskIndex: 0,
+        currentPersona: PERSONA.id,
+        projectType: resolvedTypeFast,
+      };
+    }
+  }
+
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt++) {
     if (attempt > 1) {
       log(colors.yellow(`  [Graph] -> Project Manager retry ${attempt}/${MAX_PLAN_ATTEMPTS}...`));
@@ -815,6 +852,93 @@ The prompt already specifies the exact file, exact line, and exact change needed
       continue;
     }
 
+    // Quality gate: new_project plans must have at least 4 subtasks.
+    // A game/app built from scratch legitimately requires multiple files.
+    // DeepSeek's output limit can cause only 1 subtask to survive — detect
+    // and retry with a message asking for a denser, multi-subtask plan.
+    if (
+      state.taskType === "new_project" &&
+      candidateSubtasks.length < 4 &&
+      attempt < MAX_PLAN_ATTEMPTS
+    ) {
+      lastAttemptError = new Error(
+        `new_project plan only has ${candidateSubtasks.length} subtask(s) — need at least 4`,
+      );
+      log(
+        colors.yellow(
+          `  [Graph] -> Project Manager attempt ${attempt}: new_project plan has only ${candidateSubtasks.length} subtask(s) — retrying for a more complete plan`,
+        ),
+      );
+      jsonErrorOverride =
+        `PLAN REJECTED — only ${candidateSubtasks.length} subtask(s) found. A new project requires at minimum 4 subtasks, each targeting DIFFERENT files.\n\n` +
+        `Keep each subtask VERY concise (task ≤ 60 chars, implementation_note ≤ 80 chars) so ALL 4+ subtasks fit in your response budget.\n` +
+        `CRITICAL: Each subtask must list UNIQUE files not used in any other subtask. Do NOT repeat "project.godot" or any config file in multiple subtasks.\n` +
+        `Example structure: subtask1=project.godot, subtask2=player.gd+Player.tscn, subtask3=enemy.gd+Enemy.tscn, subtask4=weapon.gd\n` +
+        `Output ONLY the JSON object — no markdown, no prose, no explanation.`;
+      continue;
+    }
+
+    // Quality gate: reject plans where multiple subtasks share the same file list
+    // (a symptom of DeepSeek repeating "project.godot" in every subtask, causing verifier auto-pass).
+    if (state.taskType === "new_project" && attempt < MAX_PLAN_ATTEMPTS) {
+      const implSubtasks = candidateSubtasks.filter(
+        s => Array.isArray(s.files) && s.files.length > 0 &&
+          !String(s.task).startsWith("REVIEW:") &&
+          !String(s.task).startsWith("ACCEPTANCE TEST:")
+      );
+      const fileListsSeen = new Set();
+      const CONFIG_FILES = new Set(["project.godot", "package.json", "tsconfig.json", "vite.config.ts"]);
+      const duplicateFileLists = implSubtasks.some(s => {
+        const uniqueNonConfig = s.files.filter(f => !CONFIG_FILES.has(path.basename(f)));
+        if (uniqueNonConfig.length === 0) return false; // config-only subtasks are OK (first scaffold)
+        const key = uniqueNonConfig.slice().sort().join("|");
+        if (fileListsSeen.has(key)) return true;
+        fileListsSeen.add(key);
+        return false;
+      });
+      if (duplicateFileLists) {
+        lastAttemptError = new Error("new_project plan has subtasks with duplicate file lists — subtasks must target unique files");
+        log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: duplicate file lists across subtasks — retrying`));
+        jsonErrorOverride =
+          `PLAN REJECTED — multiple subtasks list the same files. Each subtask must target UNIQUE files.\n\n` +
+          `Rules:\n` +
+          `- Each game/app subtask must list at least 1 unique .gd, .tscn, .js, .ts, or source file not used in any other subtask\n` +
+          `- "project.godot" / "package.json" may appear ONLY in the first (scaffold) subtask\n` +
+          `- Keep each subtask very concise (task ≤ 80 chars, implementation_note ≤ 120 chars)\n` +
+          `Output ONLY the JSON object — no markdown, no prose, no explanation.`;
+        continue;
+      }
+    }
+
+    // Quality gate: for limited-output providers (DeepSeek) + Godot projects,
+    // reject plans where any subtask lists more than 1 source (.gd/.tscn) file.
+    // DeepSeek can only output ~3000 chars per turn, so multi-file subtasks always
+    // fail verification (the coder writes only the first file then runs out of budget).
+    // Force the fallback synthesizer which generates 1-file-per-subtask plans.
+    const isLimitedOutputProviderInLoop = state.provider?.providerName === "deepseek";
+    if (isLimitedOutputProviderInLoop && attempt < MAX_PLAN_ATTEMPTS) {
+      const pmOriginalTask = String(state.messages?.[0]?.content || "");
+      const isGodot = /\bgodot\b|\.tscn\b|\.gd\b|gdscript/i.test(pmOriginalTask);
+      if (isGodot) {
+        const SOURCE_EXT = /\.(gd|tscn|tres|gdshader)$/i;
+        const hasMultiFileGodotSubtask = candidateSubtasks.some(s => {
+          const sourceFiles = (s.files || []).filter(f => SOURCE_EXT.test(f));
+          return sourceFiles.length > 1;
+        });
+        if (hasMultiFileGodotSubtask) {
+          lastAttemptError = new Error("Godot plan has multi-source-file subtasks — DeepSeek output limit will cause incomplete writes");
+          log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: Godot plan has multi-source-file subtasks — forcing fallback synthesizer`));
+          // Exhaust retries so the fallback (1-file-per-subtask) fires immediately
+          jsonErrorOverride =
+            `PLAN REJECTED — each subtask can only target ONE source file (.gd or .tscn).\n\n` +
+            `This is because the code generator has a limited output budget and can only write ONE file per response.\n` +
+            `Split multi-file subtasks into separate single-file subtasks.\n` +
+            `Output ONLY the JSON object — no markdown, no prose, no explanation.`;
+          continue;
+        }
+      }
+    }
+
     // Quality gate: reject review-only plans (no subtask writes any file).
     // REVIEW/EXECUTION-ONLY/ACCEPTANCE TEST subtasks all have files:[] and no
     // writes — a plan of only these types produces zero code changes. Force a
@@ -905,9 +1029,101 @@ The prompt already specifies the exact file, exact line, and exact change needed
     const isLimitedOutputProvider = state.provider?.providerName === "deepseek";
     if (state.taskType === "direct_fix" || state.taskType === "quick_edit" || isChunkedProvider || isLimitedOutputProvider) {
       const originalTask = state.messages[0]?.content || "Fix the bug described in the task";
+
+      // Godot new_project fallback: synthesize a sensible subtask list from game requirements.
+      // Each subtask targets ONE file so DeepSeek's ~3000 char output limit can write it fully.
+      const isGodotTask = /\bgodot\b|\.tscn\b|\.gd\b|gdscript/i.test(originalTask);
+      if (isGodotTask && state.taskType === "new_project") {
+        const note = originalTask.slice(0, 400); // short note to leave room for file content
+        const godotSubtasks = [
+          {
+            task: "Create project.godot with input map and display config",
+            implementationNote: "Godot 4 project config: app name, WASD input actions (move_left/right/up/down), 1280x720 viewport, GL compatibility renderer. Config version 5.",
+            files: ["project.godot"],
+            acceptanceCriteria: "project.godot exists with WASD input map",
+            failureCriteria: "File missing or empty",
+          },
+          {
+            task: "Create scripts/player.gd with 8-dir movement, HP and death",
+            implementationNote: "CharacterBody2D GDScript: speed=200, hp=100, take_damage(amount) method, _physics_process with Input.get_axis movement, death signal, gold tracking. Add to 'player' group.",
+            files: ["scripts/player.gd"],
+            acceptanceCriteria: "player.gd has move, take_damage, and death logic",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scenes/Player.tscn referencing scripts/player.gd",
+            implementationNote: "CharacterBody2D scene: CollisionShape2D (CircleShape2D r=16), ColorRect 32x32 yellow for body, Label for HP display above player. Script=res://scripts/player.gd.",
+            files: ["scenes/Player.tscn"],
+            acceptanceCriteria: "Player.tscn references player.gd and has collision",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/enemy.gd for walker/runner/tank types",
+            implementationNote: "CharacterBody2D GDScript: enemy_type='walker'|'runner'|'tank', matching speed/hp/damage values. Chase player with move_and_slide. take_damage, die signal, drop gold. Add to 'enemies' group.",
+            files: ["scripts/enemy.gd"],
+            acceptanceCriteria: "enemy.gd supports 3 types and chases player",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scenes/Enemy.tscn referencing scripts/enemy.gd",
+            implementationNote: "CharacterBody2D scene with CollisionShape2D, ColorRect 28x28 (red=walker, orange=runner, purple=tank), HP bar ProgressBar above enemy. Script=res://scripts/enemy.gd.",
+            files: ["scenes/Enemy.tscn"],
+            acceptanceCriteria: "Enemy.tscn has collision and HP bar",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/enemy_spawner.gd for wave-based spawning",
+            implementationNote: "Node GDScript: wave_number, enemies_per_wave. spawn_wave() instantiates Enemy.tscn at random arena-edge positions (arena 1200x680). Signals: wave_started, wave_cleared. Harder each wave.",
+            files: ["scripts/enemy_spawner.gd"],
+            acceptanceCriteria: "enemy_spawner.gd spawns enemies at arena edge per wave",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/weapon.gd for melee and ranged auto-attack",
+            implementationNote: "Node GDScript: weapon_type='melee'|'ranged', damage, range, cooldown. _process finds nearest enemy in group, attacks on cooldown. Melee: direct damage. Ranged: queue Projectile.tscn.",
+            files: ["scripts/weapon.gd"],
+            acceptanceCriteria: "weapon.gd auto-attacks nearest enemy",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/projectile.gd and scenes/Projectile.tscn",
+            implementationNote: "Area2D bullet: speed=400, damage, homing to target, queue_free on hit or 3s lifetime. Projectile.tscn: Area2D, CollisionShape2D circle r=4, ColorRect 8x8 white.",
+            files: ["scripts/projectile.gd"],
+            acceptanceCriteria: "projectile.gd moves toward enemy and deals damage",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/hud.gd and scenes/HUD.tscn for in-game UI",
+            implementationNote: "CanvasLayer scene: HP bar (ProgressBar), wave label, gold label, damage number popups. update_hp(cur,max), update_wave(n), update_gold(g), show_damage(amount, pos) methods.",
+            files: ["scripts/hud.gd"],
+            acceptanceCriteria: "hud.gd has HP/wave/gold display methods",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/shop.gd, scenes/Shop.tscn, and scenes/GameOver.tscn",
+            implementationNote: "Shop: CanvasLayer panel between waves, buy HP/speed/damage/weapon upgrades for gold. GameOver: show wave count, restart button. Main.tscn: Node2D root with Player, HUD, EnemySpawner, Camera2D children.",
+            files: ["scripts/shop.gd"],
+            acceptanceCriteria: "shop.gd handles gold purchases",
+            failureCriteria: "Missing or empty",
+          },
+          {
+            task: "Create scripts/main.gd game manager and scenes/Main.tscn",
+            implementationNote: "Main GDScript: manages game state (playing/shop/game_over), connects wave_cleared→show_shop, player died→game_over. Main.tscn: Node2D with Player.tscn, HUD.tscn, EnemySpawner as children.",
+            files: ["scripts/main.gd"],
+            acceptanceCriteria: "main.gd coordinates wave→shop→wave cycle",
+            failureCriteria: "Missing or empty",
+          },
+        ];
+        log(colors.yellow(`  [Graph] -> PM fallback (Godot): synthesizing ${godotSubtasks.length} single-file Godot subtasks`));
+        return {
+          subtasks: godotSubtasks,
+          executionPlan: `Build Godot game: ${originalTask.slice(0, 100)}`,
+        };
+      }
+
       // Extract all referenced file paths from the task description.
       const fileMatches = [...new Set(
-        (originalTask.match(/\b[\w./-]+\.(?:js|ts|jsx|tsx|css|html|py|rb|go|php|java|cs|cpp|c|rs)\b/g) || [])
+        (originalTask.match(/\b[\w./-]+\.(?:js|ts|jsx|tsx|css|html|py|rb|go|php|java|cs|cpp|c|rs|gd|tscn|tres|godot)\b/g) || [])
           .filter((f) => !f.startsWith(".") && f.length < 60)
       )];
       const files = fileMatches.length > 0 ? fileMatches : [];
@@ -1027,10 +1243,21 @@ The prompt already specifies the exact file, exact line, and exact change needed
     ),
   );
 
+  // Detect project type from disk so verifier gates fire correctly.
+  // For new projects, project.godot is usually created in subtask 1 — if not yet
+  // on disk, fall back to keyword detection from the original task description.
+  const detectedCtx = detectProjectContext(state.projectDir);
+  let resolvedProjectType = detectedCtx.projectType;
+  if (resolvedProjectType === "unknown") {
+    const originalTask = String(state.messages?.[0]?.content || "").toLowerCase();
+    if (/\bgodot\b|\.tscn\b|\.gd\b|gdscript/i.test(originalTask)) resolvedProjectType = "godot";
+  }
+
   return {
     executionPlan,
     subtasks,
     currentSubtaskIndex: 0,
     currentPersona: PERSONA.id,
+    ...(resolvedProjectType !== "unknown" ? { projectType: resolvedProjectType } : {}),
   };
 }

@@ -128,6 +128,12 @@ export async function debuggerNode(state, config) {
   log(colors.yellow("  [Graph] -> 🔍 Running Debugger Agent (targeted root-cause investigation)..."));
   eventBus.emit("persona_change", { ...PERSONA, description: "Investigating root cause of repeated failure" });
   eventBus.emit("phase_change", { phase: "DEBUGGING", label: "Debugging..." });
+  eventBus.emit("session_role_update", {
+    role: "auxiliary", status: "active",
+    provider: state.provider?.providerName || "unknown",
+    task: "debugging",
+  });
+  log(colors.dim(`  [Sessions] auxiliary active · ${state.provider?.providerName || "unknown"} · debugging`));
 
   const executionErrors = state.lastExecutionErrors || [];
   const lastResponse = state.lastCoderResponse || "";
@@ -267,6 +273,8 @@ ${reportFormatReminder}`;
       fullOutputText = result.text ?? "";
       if (fullOutputText) eventBus.emit("message_complete", { text: fullOutputText });
       debugReport = extractDebugReport(fullOutputText);
+      eventBus.emit("session_role_update", { role: "auxiliary", status: "idle" });
+      log(colors.dim(`  [Sessions] auxiliary idle`));
       log(colors.yellow(`  [Graph] -> 🔍 Debug report: ${debugReport ? "extracted" : "not found in output"}`));
     } catch (err) {
       log(colors.yellow(`  [Graph] -> 🔍 Debugger agent error (non-fatal): ${err.message}`));

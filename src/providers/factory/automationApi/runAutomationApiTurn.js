@@ -58,14 +58,29 @@ export async function runAutomationApiTurn({
     } catch (err) {
       if (err.selfHealEscape) throw err;
 
+      // Browser tab closed externally (Playwright page.goto error) — treat as
+      // SESSION_EXPIRED so the recovery path creates a fresh browser session.
+      const isBrowserClosed =
+        err.message.includes("Target page, context or browser has been closed") ||
+        (err.message.includes("page.goto") && err.message.includes("closed"));
+
       if (
-        err.message.startsWith("SESSION_EXPIRED") &&
+        (err.message.startsWith("SESSION_EXPIRED") || isBrowserClosed) &&
         !sessionRecoveryAttempted
       ) {
         sessionRecoveryAttempted = true;
         state.remoteSessionId = null;
-        await ensureAutomationSession({ state, providerName, pendingMode });
-        continue;
+        try {
+          await ensureAutomationSession({ state, providerName, pendingMode });
+          continue;
+        } catch (sessionErr) {
+          log(
+            colors.red(
+              `  [Automation API] Session recovery failed: ${sessionErr.message}`,
+            ),
+          );
+          return { ok: false, reason: `SESSION_RECOVERY_FAILED: ${sessionErr.message}` };
+        }
       }
 
       // Network failures, timeouts, and stall auto-skips — return gracefully
