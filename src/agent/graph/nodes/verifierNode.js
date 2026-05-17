@@ -2736,6 +2736,38 @@ Do NOT output [] without reading the JS module first. The verifier checks your r
           // Always run the headless gate for vanilla HTML projects — even if no getElementById
           // references were found. This catches stub JS files that have no DOM calls but still
           // break the page (e.g. missing game logic that the HTML entry point expects).
+
+          // Pre-render brace patch: if a JS file has brace imbalance (truncated from prior run),
+          // trim to the last complete top-level block then append missing closing braces so the
+          // headless browser doesn't get a syntax error from a file being rebuilt this run.
+          for (const jsPath of jsFiles) {
+            try {
+              const jsContent = await fs.promises.readFile(jsPath, "utf8");
+              const opens = (jsContent.match(/\{/g) || []).length;
+              const closes = (jsContent.match(/\}/g) || []).length;
+              if (opens > closes && opens - closes <= 30) {
+                // Find the last line that ends a top-level block (bare "}" or "};" at col 0/1).
+                // Truncate there to discard any incomplete trailing expression, then close braces.
+                const lines = jsContent.split("\n");
+                let lastGoodLine = lines.length - 1;
+                for (let li = lines.length - 1; li >= 0; li--) {
+                  const trimmed = lines[li].trim();
+                  if (trimmed === "}" || trimmed === "};" || trimmed === "});") {
+                    lastGoodLine = li;
+                    break;
+                  }
+                }
+                const truncated = lines.slice(0, lastGoodLine + 1).join("\n");
+                const remainingOpens = (truncated.match(/\{/g) || []).length;
+                const remainingCloses = (truncated.match(/\}/g) || []).length;
+                const needed = Math.max(0, remainingOpens - remainingCloses);
+                const patched = truncated + (needed > 0 ? "\n" + "}\n".repeat(needed) : "");
+                await fs.promises.writeFile(jsPath, patched);
+                log(colors.dim(`  [Verifier] Pre-render brace patch: ${path.basename(jsPath)} truncated to line ${lastGoodLine + 1}, +${needed} closing brace(s)`));
+              }
+            } catch { /* skip */ }
+          }
+
           try {
               const { chromium } = await import("playwright-core");
               const browser = await chromium.launch({ headless: true });
