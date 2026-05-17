@@ -19,7 +19,7 @@ export class AutomationApiHandler {
     }
   }
 
-  async sendTurn(payload, label) {
+  async sendTurn(payload, label, context = {}) {
     try {
       if (!this.remoteSessionId) {
         const sessionData = await createRemoteSession(this.providerName);
@@ -34,10 +34,13 @@ export class AutomationApiHandler {
         ),
       );
 
+      const projectDir = context?.rootDir ?? null;
       const { text: responseText } = await sendRemoteTurn(
         this.remoteSessionId,
         promptText,
         label,
+        null,
+        { projectDir },
       );
 
       eventBus.emit("message_chunk", { chunk: responseText });

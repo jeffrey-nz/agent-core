@@ -68,7 +68,13 @@ export async function gitResetHard(cwd) {
   const first = await execAsync("git reset --hard HEAD", { cwd });
 
   if (first.status === 0) {
-    await execAsync("git clean -fd", { cwd });
+    // Only clean non-source files — nuclear writes source files directly to disk
+    // before they're committed, so git clean -fd would delete them. Limit cleanup
+    // to known junk: compiled artifacts, logs, temp dirs.
+    await execAsync(
+      "git clean -fd --exclude='*.js' --exclude='*.ts' --exclude='*.tsx' --exclude='*.jsx' --exclude='*.css' --exclude='*.html' --exclude='*.htm' --exclude='*.py' --exclude='*.rb' --exclude='*.php' --exclude='*.go' --exclude='*.java' --exclude='*.json' --exclude='*.yaml' --exclude='*.yml' --exclude='*.toml' --exclude='*.md' --exclude='*.txt' --exclude='*.svg' --exclude='*.png' --exclude='*.jpg'",
+      { cwd }
+    );
     return { ok: true };
   }
 
@@ -125,7 +131,10 @@ export async function gitResetHard(cwd) {
   }
 
   if (second.status === 0) {
-    await execAsync("git clean -fd", { cwd });
+    await execAsync(
+      "git clean -fd --exclude='*.js' --exclude='*.ts' --exclude='*.tsx' --exclude='*.jsx' --exclude='*.css' --exclude='*.html' --exclude='*.htm' --exclude='*.py' --exclude='*.rb' --exclude='*.php' --exclude='*.go' --exclude='*.java' --exclude='*.json' --exclude='*.yaml' --exclude='*.yml' --exclude='*.toml' --exclude='*.md' --exclude='*.txt' --exclude='*.svg' --exclude='*.png' --exclude='*.jpg'",
+      { cwd }
+    );
 
     if (fixedFiles.length > 0) {
       log(

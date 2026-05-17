@@ -30,7 +30,8 @@ export async function sendRemoteTurn(sessionId, text, label, signal, opts = {}) 
 
   let res;
   try {
-    res = await doFetch(sessionId, safeText, { label, signal, attachments });
+    const { projectDir = null, skipConstraint = false } = opts;
+    res = await doFetch(sessionId, safeText, { label, signal, attachments, projectDir, skipConstraint });
   } catch (err) {
     telemetry.stop();
     log(

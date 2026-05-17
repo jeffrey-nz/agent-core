@@ -13,7 +13,7 @@ import { classifyEnvironmentError } from "#agent/utils/executionOutputAnalysis.j
 import { MAX_STEPS_CODER, MAX_STEPS_CODER_UNITY } from "#config/pipeline.js";
 import { buildCoderDirective, getCoderMaxSteps, buildAcceptanceTestDirective, GODOT_BIN_PATH } from "#utils/projectDirectives.js";
 import { resolveProjectUrl } from "#copilot/run/main/applyFilesPhase/validators/resolveProjectUrl.js";
-import { readFile, access } from "node:fs/promises";
+import { readFile, writeFile, appendFile, access } from "node:fs/promises";
 import path from "node:path";
 
 const PERSONA = personaMeta("coder");
@@ -417,6 +417,104 @@ function extractSubtaskCriticSection(criticReport, subtaskIndex, subtask) {
   return parts.join("\n\n").trim();
 }
 
+// Tries to extract code blocks (fenced or raw CSS/JS) from nuclear retry response text.
+// Returns true if at least one file was written, false otherwise.
+async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modifiedFiles, logFn, colors) {
+  if (!nuclearText || !plannedFiles.length || !projectDir) return false;
+
+  logFn(colors.dim(`  [Graph] -> Nuclear result text preview: ${nuclearText.slice(0, 250).replace(/\n/g, "↵")}`));
+
+  const ncbExtMap = { css: '.css', js: '.js', javascript: '.js', html: '.html' };
+  let extracted = false;
+
+  // 1. Try fenced code blocks first (```css, ```js, etc.)
+  const ncbRe = /```(\w+)\n([\s\S]*?)```/g;
+  let ncbMatch;
+  while ((ncbMatch = ncbRe.exec(nuclearText)) !== null) {
+    const lang = ncbMatch[1].toLowerCase();
+    const code = ncbMatch[2];
+    if (!code.trim() || code.length < 50) continue;
+    const ext2 = ncbExtMap[lang];
+    if (!ext2) continue;
+    const targetFile2 = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ext2);
+    if (!targetFile2) continue;
+    const absTarget2 = path.isAbsolute(targetFile2) ? targetFile2 : path.join(projectDir, targetFile2);
+    try {
+      await writeFile(absTarget2, code);
+      logFn(colors.green(`  [Graph] -> Nuclear code-block extraction: wrote ${code.length} chars to ${path.basename(absTarget2)}`));
+      modifiedFiles.push(absTarget2);
+      extracted = true;
+    } catch (_) {}
+  }
+  if (extracted) return true;
+
+  // 2. Fallback: detect raw unfenced CSS or JS if no code blocks found.
+  // DeepSeek's web UI renders code blocks by stripping the ``` fence markers
+  // but sometimes leaving the language name (e.g. "css\n/* styles */" or
+  // "javascript\nconst ..."). Strip the language prefix before matching.
+  const rawText = nuclearText.trim();
+  const langPrefixMatch = rawText.match(/^(css|javascript|js|html)\n([\s\S]+)/i);
+  const textToCheck = langPrefixMatch ? langPrefixMatch[2] : rawText;
+  const detectedLang = langPrefixMatch ? langPrefixMatch[1].toLowerCase() : null;
+
+  // If a fenced-block language prefix was found, use it directly (CSS or JS)
+  if (langPrefixMatch && textToCheck.length > 100) {
+    const isCssLang = detectedLang === "css";
+    const isJsLang = detectedLang === "js" || detectedLang === "javascript";
+    const ext3 = isCssLang ? ".css" : isJsLang ? ".js" : null;
+    if (ext3) {
+      const target3 = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ext3);
+      if (target3) {
+        const absTarget3 = path.isAbsolute(target3) ? target3 : path.join(projectDir, target3);
+        try {
+          await writeFile(absTarget3, textToCheck.trim());
+          logFn(colors.green(`  [Graph] -> Nuclear lang-prefix extraction (${detectedLang}): wrote ${textToCheck.length} chars to ${path.basename(absTarget3)}`));
+          modifiedFiles.push(absTarget3);
+          extracted = true;
+        } catch (_) {}
+      }
+    }
+  }
+
+  if (extracted) {
+    logFn(colors.yellow(`  [Graph] -> Nuclear raw-code extraction succeeded`));
+    return true;
+  }
+
+  // Heuristic detection when no language prefix
+  const looksLikeCss = textToCheck.includes("{") && textToCheck.includes("}") &&
+    /^(?:\/\*|body\s*\{|html\s*\{|:root\s*\{|\*\s*\{|\.[a-zA-Z]|\#[a-zA-Z]|@import|@keyframes)/.test(textToCheck);
+  const looksLikeJs = textToCheck.length > 300 && textToCheck.includes("{") && textToCheck.includes("}") &&
+    /\b(?:const|let|var|function|class|return|if\s*\(|addEventListener|document\.|window\.)\b/.test(textToCheck);
+
+  if (looksLikeCss) {
+    const target = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ".css");
+    if (target) {
+      const absTarget = path.isAbsolute(target) ? target : path.join(projectDir, target);
+      try {
+        await writeFile(absTarget, textToCheck.trim());
+        logFn(colors.green(`  [Graph] -> Nuclear raw-CSS extraction: wrote ${textToCheck.length} chars to ${path.basename(absTarget)}`));
+        modifiedFiles.push(absTarget);
+        extracted = true;
+      } catch (_) {}
+    }
+  } else if (looksLikeJs) {
+    const target = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ".js");
+    if (target) {
+      const absTarget = path.isAbsolute(target) ? target : path.join(projectDir, target);
+      try {
+        await writeFile(absTarget, textToCheck.trim());
+        logFn(colors.green(`  [Graph] -> Nuclear raw-JS extraction: wrote ${textToCheck.length} chars to ${path.basename(absTarget)}`));
+        modifiedFiles.push(absTarget);
+        extracted = true;
+      } catch (_) {}
+    }
+  }
+
+  if (extracted) logFn(colors.yellow(`  [Graph] -> Nuclear raw-code extraction succeeded`));
+  return extracted;
+}
+
 export async function coderNode(state, config) {
   log(
     colors.cyan(
@@ -480,6 +578,9 @@ export async function coderNode(state, config) {
   // Detect Copilot (Personal) provider early — used throughout prompt construction.
   // Copilot refuses JSON write_file arrays; the pipeline uses <<<FILE:>>> format instead.
   const isCopilot = state.provider?.providerName?.includes('copilot') ?? false;
+  // DeepSeek R1 has a hidden thinking chain (~600-800 tokens). Asking it to also
+  // output a visible <think> block wastes the ~3000 char visible output budget.
+  const isDeepSeek = state.provider?.providerName === "deepseek";
 
   // Vanilla HTML project: inject actual element IDs from index.html so the coder
   // uses the correct IDs rather than inventing 1-indexed variants.
@@ -581,7 +682,11 @@ export async function coderNode(state, config) {
     const firstWriteTarget = firstPlannedFile
       ? (path.isAbsolute(firstPlannedFile) ? firstPlannedFile : path.join(state.projectDir, firstPlannedFile))
       : null;
-    const firstWriteHint = firstWriteTarget
+    // DeepSeek (limited-output provider) copies template content placeholders literally
+    // (e.g. it writes "...full file content..." or "" as the actual file content).
+    // Skip firstWriteHint for DeepSeek — the nuclear few-shot already guides format.
+    const isDeepSeek = state.provider?.providerName === "deepseek";
+    const firstWriteHint = firstWriteTarget && !isDeepSeek
       ? isCopilot
         ? `\n⚡ FIRST ACTION: Start immediately with the first file using <<<FILE:>>> format:\n` +
           `<<<FILE: ${firstWriteTarget}>>>\n// complete file content here\n<<<END FILE>>>\n` +
@@ -890,7 +995,9 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
 
     // Remind the model that <think> must be followed IMMEDIATELY by tool calls.
     const jsonOnlyReminder = retryCount >= 1
-      ? `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY. Example:\n<think>\nTask: patch the file\nFiles to write: src/App.tsx\nRead first: src/App.tsx\n</think>\n[{"tool":"read_file","path":"/abs/src/App.tsx"}]\n... (after reading) ...\n[{"tool":"patch_file","path":"/abs/src/App.tsx","search_block":"...","replace_block":"..."}]\nTASK_DONE\nDo NOT output <think> alone — it does nothing without the following JSON array.\n`
+      ? isDeepSeek
+        ? `\n⚠️ MANDATORY ON RETRY: Output the JSON tool call array IMMEDIATELY — no preamble. Example:\n\`\`\`json\n[{"tool":"write_file","path":"${state.projectDir}/index.html","content":"<html>...</html>"}]\n\`\`\`\nThen output: TASK_DONE\nDo NOT explain. Do NOT describe. Just the JSON code block.\n`
+        : `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY. Example:\n<think>\nTask: patch the file\nFiles to write: src/App.tsx\nRead first: src/App.tsx\n</think>\n[{"tool":"read_file","path":"/abs/src/App.tsx"}]\n... (after reading) ...\n[{"tool":"patch_file","path":"/abs/src/App.tsx","search_block":"...","replace_block":"..."}]\nTASK_DONE\nDo NOT output <think> alone — it does nothing without the following JSON array.\n`
       : "";
 
     // ── Strategy Diversification ─────────────────────────────────────────────
@@ -903,7 +1010,8 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
       strategyHint =
         `\n[STRATEGY SHIFT — RETRY ${retryCount + 1} — TOOL SWITCH]\n` +
         `Your previous approach failed. Switch tools:\n` +
-        `• If you used patch_file → switch to write_file (complete file replacement).\n` +
+        `• If you used patch_file → try a different patch_file search_block (more unique context around the target line).\n` +
+        `  EXCEPTION: Only switch to write_file if the file is small (<50 lines) — for large files write_file generation is slow and prone to timeout.\n` +
         `• If you used write_file → re-read the file with read_file first, then patch_file the specific target section.\n` +
         `Re-read ALL files this subtask touches — do NOT rely on your memory of their contents.\n`;
     } else if (retryCount === 2) {
@@ -912,7 +1020,7 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
         `Two prior attempts failed. ABANDON your current approach entirely.\n` +
         `Use read_file on EVERY file in this subtask — even ones you have read before.\n` +
         `Derive the solution ONLY from what you read now, not from memory or prior attempts.\n` +
-        `Use write_file for complete file replacements to avoid stale patch_file search_block mismatches.\n`;
+        `Prefer patch_file with a fresh, unique search_block. Only use write_file if the file is under 50 lines.\n`;
     } else if (retryCount >= 3 && !state.debugReport) {
       strategyHint =
         `\n[STRATEGY SHIFT — RETRY ${retryCount + 1} — MINIMAL CHANGE MODE]\n` +
@@ -929,9 +1037,12 @@ ${failureClassification}${jsonOnlyReminder}${strategyHint}
 Do NOT repeat an approach that has already failed - choose a different strategy based on the failure type above.\n`;
   }
 
-  // On stall retries truncate the scope doc aggressively — the model has already
-  // seen the full version and the extra context may contribute to prose overflow.
-  const effectiveScopeSection = isStallRetry && _strippedScope
+  // For DeepSeek (limited visible output ~3000 chars), always strip the scope to
+  // 500 chars to leave room in the output budget for the JSON tool call array.
+  // On stall retries for other providers, truncate to 2000 chars aggressively.
+  const effectiveScopeSection = isDeepSeek && _strippedScope
+    ? `\n[SCOPE DOCUMENT — truncated; use read_file for details]\n${_strippedScope.slice(0, 500)}\n...[scope truncated]\n`
+    : isStallRetry && _strippedScope
     ? `\n[SCOPE DOCUMENT — truncated for stall retry; use read_file for full details]\n${_strippedScope.slice(0, 2000)}\n...[scope truncated — use read_file if more detail is needed]\n`
     : scopeSection;
 
@@ -966,12 +1077,11 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
   WRONG: 'Hello ' + name + '!'  is right — NOT Hello \${name}!
   Before finishing, scan your entire output — if you see any backtick character, replace it with string concatenation.
 ${diagnosticsInstruction}- Do not deviate from the current subtask.
-${coderDirective}
+- CSS CLASS NAMES: Every CSS class you reference in your HTML must exist in style.css and vice-versa — no dead selectors, no missing classes.
 - EXISTING FILES: For files that already exist and need updates, rewrite the complete file content inside <<<FILE:>>>...<<<END FILE>>> blocks. CRITICAL: If the existing file is larger than 100 lines, you MUST preserve ALL existing functions, event handlers, game logic, and bootstrap code — do not truncate. A write that removes existing functionality is a destructive regression.
 - After writing all files, output: TASK_DONE`
     : `Instructions:
-- [REASONING PROTOCOL] Start your response with a thinking block:\n<think>\nTask: what this subtask achieves\nFiles to write: [every file this subtask needs — list ALL of them]\nRead first: [files that must be read before writing, or "none"]\n</think>\nThen IMMEDIATELY output the JSON array with ALL tool calls.
-- [BATCH WRITING] Write ALL files for this subtask in ONE JSON array. Do NOT write one file, wait for results, then write the next. For a subtask with 5 files: put all 5 write_file calls in a single array. When done: output TASK_DONE.
+${isDeepSeek ? "" : "- [REASONING PROTOCOL] Start your response with a thinking block:\\n<think>\\nTask: what this subtask achieves\\nFiles to write: [every file this subtask needs — list ALL of them]\\nRead first: [files that must be read before writing, or \"none\"]\\n</think>\\nThen IMMEDIATELY output the JSON array with ALL tool calls.\n"}- [BATCH WRITING] Write ALL files for this subtask in ONE JSON array. Do NOT write one file, wait for results, then write the next. For a subtask with 5 files: put all 5 write_file calls in a single array. When done: output TASK_DONE.
 - CRITICAL - PROSE OUTPUT IS NOT A FILE WRITE: Writing code as text in your response does NOT create any file — it is immediately discarded. You MUST use write_file or patch_file tool calls: [{"tool": "write_file", "path": "/abs/path", "content": "..."}]
 ${diagnosticsInstruction}- Do not deviate from the current subtask.
 - NEVER write, patch, delete, or diff files inside vendor/, node_modules/, or .git/ - these directories are managed by package managers and must not be modified manually.
@@ -1013,16 +1123,21 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
   // 80-100KB), cutting first-turn latency from 30-60 s to 8-15 s.
   // On retries we keep a recent tail so the coder sees its own prior exchange.
   const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+  // DeepSeek R1 has a hidden thinking chain that consumes ~600-800 tokens before
+  // any visible output. The visible output budget is ~3000-3500 chars. Using a
+  // large tail of prior messages (16, 10) causes prose output because the system
+  // prompt + message history leave DeepSeek with no visible budget for JSON.
+  // Always use TAIL_SIZE=4 for DeepSeek — the retry context in the system prompt
+  // (retrySection) already explains what failed, so extra history is redundant.
+  const isLimitedOutputProvider = state.provider?.providerName === "deepseek";
   let windowedMessages;
   if (retryCount === 0 && !isStallRetry) {
     // Fresh subtask start — only the original user task message.
     windowedMessages = [state.messages[0]].filter(Boolean);
-  } else if (isChunkedProvider) {
-    // Chunked provider (e.g. Copilot, 9500 char limit): keep ONLY the original
-    // task message on all retries.  Each added tail message grows the prompt by
-    // another chunk, making Copilot progressively more confused.  The retry
-    // context (failure type, strategy hint) is already injected via retrySection
-    // in the system prompt, so the history is redundant.
+  } else if (isChunkedProvider || isLimitedOutputProvider) {
+    // Chunked provider (e.g. Copilot, 9500 char limit) or limited-output provider
+    // (e.g. DeepSeek): keep ONLY the original task message on all retries.
+    // The retry context is injected via retrySection in the system prompt.
     windowedMessages = [state.messages[0]].filter(Boolean);
   } else {
     // Retry — use a shrinking tail of recent messages so the coder sees what
@@ -1095,6 +1210,7 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
   let resolvedTools = [];
   let modifiedFiles = [];
   let executionErrors = [];
+  let proseCodeExtracted = false; // hoisted so nuclearExtracted is accessible in return
 
   const signal = config?.signal ?? null;
   const context = {
@@ -1145,6 +1261,20 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
       dashboardState.aiStatus = label;
       eventBus.emit("spinner_update", { status: label });
     }, 10000);
+
+    // For DeepSeek (limited-output provider), the browser session accumulates
+    // all pipeline messages (intent, scoper, PM, validator, critic) before the
+    // coder runs. DeepSeek sees this planning conversation and outputs [] (done)
+    // because it thinks the planning phase completed the work. Starting a fresh
+    // chat at the beginning of each subtask gives DeepSeek a clean context.
+    if (isLimitedOutputProvider && retryCount === 0 && !isStallRetry && state.provider?.startNewChat) {
+      try {
+        await state.provider.startNewChat();
+        log(colors.dim(`  [Graph] -> Fresh chat started for coder subtask ${state.currentSubtaskIndex + 1} (limited-output provider)`));
+      } catch (startErr) {
+        log(colors.dim(`  [Graph] -> Fresh chat start failed (${startErr.message}) — using existing session`));
+      }
+    }
 
     // On a stall, force a fresh browser session so the accumulated chat history
     // (often a half-finished response that's blocking new turns) is cleared.
@@ -1306,13 +1436,36 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
     executionErrors = result.executionErrors ?? [];
     eventBus.emit("message_complete", {});
 
+    // ── Empty write_file / patch_file guard ──────────────────────────────────
+    // DeepSeek sometimes outputs write_file or patch_file with empty content —
+    // the file body was too large to JSON-encode in the truncated response.
+    // Treat this as "no effective writes" so the nuclear retry fires and asks
+    // for a code block instead.
+    let forceNuclear = false;
+    if (isLimitedOutputProvider && resolvedTools.length > 0) {
+      const writeTools = resolvedTools.filter(tc => {
+        const name = (tc.tool || tc.name || "");
+        return name === "write_file" || name === "patch_file";
+      });
+      const allEmpty = writeTools.length > 0 && writeTools.every(tc => {
+        const c = tc.content ?? tc.args?.content ?? tc.input?.content ??
+                  tc.replacement ?? tc.args?.replacement ?? tc.input?.replacement ?? "";
+        return typeof c === "string" && c.trim().length === 0;
+      });
+      if (allEmpty) {
+        log(colors.yellow(`  [Graph] -> write_file/patch_file had empty content (${writeTools.length} call(s)) — forcing nuclear retry`));
+        resolvedTools = [];
+        forceNuclear = true;
+      }
+    }
+
     // ── Inline prose-output detection ────────────────────────────────────────
     // When the provider returns a long text response with zero tool calls, the
     // model output file content as prose instead of calling write_file/patch_file.
     // Rather than waiting for a full verifier round-trip (3-4 wasted retries per
     // subtask), inject a "USE TOOLS" nuclear message and retry immediately.
     // Only fires once per turn (no infinite retry here — just one extra attempt).
-    if (resolvedTools.length === 0 && fullText.length > 300) {
+    if ((resolvedTools.length === 0 && fullText.length > 300) || forceNuclear) {
       // Detect prose file content: markdown code fences, YAML structure,
       // or indented code blocks that indicate the model wrote out file content.
       const looksLikeFileContent =
@@ -1329,7 +1482,42 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         /^\[\s*\{/m.test(fullText) ||          // JSON array of objects
         /^\s*\{\s*\n\s*"[\w_]+":/m.test(fullText); // JSON object with string keys
 
-      if (looksLikeFileContent) {
+      if (looksLikeFileContent || forceNuclear) {
+        // ── Pre-nuclear: extract code blocks from DeepSeek prose ─────────────
+        // DeepSeek often outputs ```css or ```js blocks instead of JSON tool calls.
+        // Extract those and write directly, skipping the nuclear retry entirely.
+        proseCodeExtracted = false; // reset for this turn (var hoisted to function scope)
+        const plannedFilesForExtract = state.subtasks?.[state.currentSubtaskIndex]?.files || [];
+        if (plannedFilesForExtract.length > 0 && state.projectDir) {
+          const extMap = { css: '.css', js: '.js', javascript: '.js', html: '.html', ts: '.ts', tsx: '.tsx', jsx: '.jsx' };
+          const codeBlockRe = /```(\w+)\n([\s\S]*?)```/g;
+          let match;
+          while ((match = codeBlockRe.exec(fullText)) !== null) {
+            const lang = match[1].toLowerCase();
+            const code = match[2];
+            if (!code.trim() || code.length < 100) continue;
+            const ext = extMap[lang];
+            if (!ext) continue;
+            const targetFile = plannedFilesForExtract.find(f => {
+              const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+              return abs.endsWith(ext) || path.extname(abs).toLowerCase() === ext;
+            });
+            if (!targetFile) continue;
+            const absTarget = path.isAbsolute(targetFile) ? targetFile : path.join(state.projectDir, targetFile);
+            try {
+              await writeFile(absTarget, code);
+              log(colors.green(`  [Graph] -> Code-block extraction: wrote ${code.length} chars to ${path.basename(absTarget)}`));
+              modifiedFiles.push(absTarget);
+              proseCodeExtracted = true;
+            } catch (e) { /* ignore */ }
+          }
+          if (proseCodeExtracted) {
+            log(colors.yellow(`  [Graph] -> Code-block extraction succeeded — skipping nuclear retry`));
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        if (!proseCodeExtracted) {
         log(colors.yellow(
           `  [Graph] -> Prose-output detected (${fullText.length} chars, 0 tool calls) — injecting nuclear retry`,
         ));
@@ -1346,25 +1534,92 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         // producing more chunks and deepening the confusion.  Instead, start a fresh
         // session and send a minimal, targeted prompt that fits in a single chunk.
         const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
+        const isLimitedOutputProvider = state.provider?.providerName === "deepseek";
         let nuclearMessages;
-        if (isChunkedProvider && plannedFiles.length > 0 && state.projectDir) {
-          log(colors.yellow(`  [Graph] -> Nuclear retry: chunked provider — using minimal fresh-session prompt`));
+        let nuclearContext = context;
+        if ((isChunkedProvider || isLimitedOutputProvider) && plannedFiles.length > 0 && state.projectDir) {
+          const firstFile = plannedFiles[0] || "file.js";
+          const ext = path.extname(firstFile).toLowerCase();
+          const absFirstFile = path.isAbsolute(firstFile) ? firstFile : path.join(state.projectDir, firstFile);
+          const langName = ext.replace(".", "") || "js";
+          const implNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
+          const originalTask = state.messages?.[0]?.content?.slice(0, 800) || "";
+
+          log(colors.yellow(`  [Graph] -> Nuclear retry: ${isLimitedOutputProvider ? "DeepSeek" : "chunked"} provider — fresh session, conversational prompt`));
           try {
             await state.provider.startNewChat?.();
           } catch (_) { /* ignore */ }
-          const fileSnippets = await Promise.all(
-            plannedFiles.slice(0, 2).map(async (f) => {
-              const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+
+          if (isLimitedOutputProvider) {
+            // DeepSeek echoes long structured prompts (with "TASK:", "File to create:", absolute
+            // paths, or "You are a software engineer"). A short, conversational ask avoids echo.
+            // Implementation notes that start with "Write lines X-Y:" or "Append lines" are
+            // especially prone to echo — use the user's original task or subtask description instead.
+            const implNoteEchoes = /^(write|append)\s+(lines?|the)\s+\d+/i.test(implNote);
+            const bestDesc = (implNoteEchoes || !implNote)
+              ? (state.initialPrompt || bareTask || implNote)
+              : implNote;
+            const shortTask = bestDesc.slice(0, 250).replace(/\n/g, " ");
+
+            // For JS files in HTML projects, inject DOM element IDs so the model uses correct IDs.
+            let htmlIdHint = "";
+            if ((langName === "js" || langName === "ts") && state.projectDir) {
               try {
-                const content = await readFile(abs, "utf8");
-                return `\n<<<CURRENT FILE: ${f}>>>\n${content}\n<<<END FILE>>>`;
-              } catch { return ""; }
-            }),
-          );
-          const minimalPrompt =
-            `TASK: ${bareTask}\n\nYou MUST use write_file — output ONLY the JSON tool call array, then TASK_DONE. No prose.\n` +
-            fileSnippets.join("\n");
-          nuclearMessages = [{ role: "user", content: minimalPrompt }];
+                for (const candidate of ["index.html", "main.html", "app.html"]) {
+                  try {
+                    const htmlContent = await readFile(path.join(state.projectDir, candidate), "utf-8");
+                    const ids = [...htmlContent.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+                    if (ids.length > 0) {
+                      htmlIdHint = ` HTML IDs: ${ids.join(", ")}.`;
+                      break;
+                    }
+                  } catch { /* file not found */ }
+                }
+              } catch { /* ignore */ }
+            }
+
+            nuclearContext = { ...context, interactionMode: "scoping", skipConstraint: true };
+            nuclearMessages = [
+              {
+                role: "user",
+                content: [
+                  `Write the complete ${langName} code for this project: ${shortTask}${htmlIdHint}`,
+                  ``,
+                  `Output ONLY the code in a \`\`\`${langName}\`\`\` code block.`,
+                ].join("\n"),
+              },
+            ];
+          } else {
+            // Chunked providers (e.g. Copilot) need full context in the fresh session.
+            const fileSnippets = await Promise.all(
+              plannedFiles.slice(0, 2).map(async (f) => {
+                const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
+                try {
+                  const content = await readFile(abs, "utf8");
+                  return `\n<<<CURRENT FILE: ${f}>>>\n${content}\n<<<END FILE>>>`;
+                } catch { return ""; }
+              }),
+            );
+            const absoluteFiles = plannedFiles
+              .map(f => (path.isAbsolute(f) ? f : path.join(state.projectDir, f)))
+              .join(", ");
+            const minimalPrompt = [
+              `TASK: ${bareTask}`,
+              implNote ? `Implementation details: ${implNote}` : "",
+              `File(s) to create: ${absoluteFiles || "(see task)"}`,
+              originalTask ? `Original project requirements:\n${originalTask}` : "",
+              "",
+              `You MUST use write_file to create ONLY the file listed under "File(s) to create". Output ONLY the JSON tool call array in a \`\`\`json code block with the complete file content. No prose, no explanation.`,
+              ...fileSnippets,
+            ].filter(Boolean).join("\n");
+            nuclearMessages = [
+              {
+                role: "system",
+                content: "You are a software engineer. Use the write_file tool to create the requested files. Use ONLY the JSON tool call format specified in the user message.",
+              },
+              { role: "user", content: minimalPrompt },
+            ];
+          }
         } else {
           nuclearMessages = [
             ...messages,
@@ -1376,22 +1631,195 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
           ];
         }
 
-        try {
-          const nuclearResult = await state.provider.sendTurn(nuclearMessages, "coder", context);
+        const handleNuclearResult = async (nuclearResult) => {
           if (nuclearResult?.ok && (nuclearResult.toolCalls?.length ?? 0) > 0) {
-            log(colors.cyan(
-              `  [Graph] -> Nuclear prose-retry succeeded (${nuclearResult.toolCalls.length} tool call(s))`,
-            ));
-            fullText = nuclearResult.text ?? fullText;
-            resolvedTools = nuclearResult.toolCalls;
-            modifiedFiles = nuclearResult.modifiedFiles ?? [];
-            executionErrors = nuclearResult.executionErrors ?? [];
-          } else {
+            let validToolCalls = nuclearResult.toolCalls;
+            if (isLimitedOutputProvider && plannedFiles.length > 0) {
+              const expectedPaths = plannedFiles.map(f =>
+                path.isAbsolute(f) ? f : path.join(state.projectDir, f)
+              );
+              const filtered = (nuclearResult.toolCalls ?? []).filter(tc => {
+                if (tc.tool !== "write_file" && tc.tool !== "patch_file") return true;
+                const tcPath = tc.args?.path ?? tc.params?.path ?? "";
+                return expectedPaths.some(ep => tcPath === ep || tcPath.endsWith(path.basename(ep)));
+              });
+              if (filtered.length === 0 && validToolCalls.length > 0) {
+                const wrongPaths = (nuclearResult.toolCalls ?? []).map(tc => tc.args?.path ?? "?").join(", ");
+                log(colors.yellow(`  [Graph] -> Nuclear retry: filtered ${validToolCalls.length} wrong-path tool call(s) (${wrongPaths}) — treating as no tool calls`));
+                validToolCalls = [];
+              } else if (filtered.length < validToolCalls.length) {
+                log(colors.dim(`  [Graph] -> Nuclear retry: kept ${filtered.length}/${validToolCalls.length} tool call(s) matching planned files`));
+                validToolCalls = filtered;
+              }
+            }
+            if (validToolCalls.length > 0) {
+              log(colors.cyan(`  [Graph] -> Nuclear prose-retry succeeded (${validToolCalls.length} tool call(s))`));
+              fullText = nuclearResult.text ?? fullText;
+              resolvedTools = validToolCalls;
+              modifiedFiles = nuclearResult.modifiedFiles ?? [];
+              executionErrors = nuclearResult.executionErrors ?? [];
+              proseCodeExtracted = true;
+              return;
+            }
+          }
+          proseCodeExtracted = await tryNuclearExtract(nuclearResult?.text ?? "", plannedFiles, state.projectDir, modifiedFiles, log, colors);
+        };
+
+        try {
+          const nuclearResult = await state.provider.sendTurn(nuclearMessages, "nuclear", nuclearContext);
+          await handleNuclearResult(nuclearResult);
+
+          // ── Truncation continuation (DeepSeek) ─────────────────────────────
+          // DeepSeek caps responses at ~3000 chars. After nuclear writes a JS file,
+          // check for two failure modes:
+          //   1. Unbalanced braces → code was truncated mid-function → append continuation
+          //   2. File too short (<5000 chars) → only data/skeleton was written → append
+          //      targeted sections (combat functions, UI renderers, game flow/listeners)
+          //
+          // Always APPEND (never overwrite) — overwriting just repeats the same skeleton.
+          // DeepSeek caps outputs at ~3000 chars, so a complete game requires 3+ continuations.
+          if (proseCodeExtracted && isLimitedOutputProvider && plannedFiles.length > 0 && state.projectDir) {
+            // Standalone targeted prompts — used on FRESH sessions (no nuclear context needed).
+            // DeepSeek's nuclear session is busy after the response; a fresh session is faster
+            // and avoids HTTP 500. Each prompt is self-contained (no "the code above" reference).
+            // Use the EXACT nuclear-1 format: "Write the complete js code for this project: [desc]"
+            // Anything else (e.g. "Write JavaScript COMBAT FUNCTIONS...") gets 8s prose from DeepSeek.
+            const appendPrompts = [
+              `Write the complete js code for this project: Slay the Spire combat functions. gameState.hero has hp,maxHp,block,energy,hand[],drawPile[],discardPile[]. gameState.enemy has hp,maxHp,block,vulnerable,pattern[],patternIndex. Write: shuffle(arr) Fisher-Yates; drawCard() draw from drawPile; playCard(id) costs energy, damages via applyDamageToEnemy or blocks via addBlockToPlayer, discards, calls updateDisplay; applyDamageToEnemy(n) 1.5x if vulnerable, check hp<=0 showRewards; applyDamageToPlayer(n) block absorbs first, check hp<=0 showDefeat; addBlockToPlayer(n).\n\nOutput ONLY the code in a \`\`\`js\`\`\` code block.`,
+              `Write the complete js code for this project: Slay the Spire turn functions. enemyTurn() reads enemy.pattern[patternIndex%len], attacks with applyDamageToPlayer or sets enemy.vulnerable, increments patternIndex; endTurn() discards hero.hand, resets hero.block, restores hero.energy, calls enemyTurn, draws 5 cards, updateDisplay; nextFloor() floor++ then if>4 showVictory else startCombat; startCombat() clones ENEMIES[rand] or HEXAGHOST at floor>=5, resets all status, draws 5.\n\nOutput ONLY the code in a \`\`\`js\`\`\` code block.`,
+              `Write the complete js code for this project: Slay the Spire UI and init. IDs: hero-hp,hero-energy,hero-block,hero-status-text,enemy-name,enemy-hp,enemy-block,enemy-status-text,hand,end-turn-btn,reward-section,reward-cards,continue-btn,win-lose-screen,win-lose-title,reset-btn. updateDisplay() fills DOM from gameState; renderHand() card buttons onclick=playCard; showRewards() shows 3 random cards to pick; showVictory/showDefeat toggle win-lose-screen; initGame() builds starting deck, shuffles, startCombat; DOMContentLoaded→initGame.\n\nOutput ONLY the code in a \`\`\`js\`\`\` code block.`,
+            ];
+            for (const pf of plannedFiles) {
+              const pfExt = path.extname(pf).toLowerCase();
+              if (![".js", ".ts", ".tsx", ".jsx"].includes(pfExt)) continue;
+              const pfAbs = path.isAbsolute(pf) ? pf : path.join(state.projectDir, pf);
+              const pfLang = pfExt.replace(".", "") || "js";
+              // Use a fresh session for each continuation — standalone self-contained prompts.
+              // Never embed the existing code in the prompt (causes DeepSeek to echo it back).
+              const contContext = { ...context, interactionMode: "scoping", skipConstraint: true };
+              for (let contAttempt = 0; contAttempt < appendPrompts.length; contAttempt++) {
+                const prompt = appendPrompts[contAttempt];
+                log(colors.yellow(`  [Graph] -> Nuclear continuation ${contAttempt + 1}/${appendPrompts.length} — appending section to ${path.basename(pfAbs)}`));
+                try { await state.provider.startNewChat?.(); } catch (_) {}
+                let contResult;
+                try { contResult = await state.provider.sendTurn([{ role: "user", content: prompt }], `nuclear-cont-${contAttempt + 1}`, contContext); } catch { break; }
+                const contText = contResult?.text ?? "";
+                const fenced = contText.match(/```(?:\w+)?\n([\s\S]*?)```/i);
+                // Also check for lang-prefix code ANYWHERE (not just at start) — DeepSeek
+                // sometimes echoes the prompt first, then provides code on a new line.
+                const prefixed = contText.match(/^(?:js|javascript|ts|typescript)\n([\s\S]+)/i)
+                  || contText.match(/\n(?:js|javascript|ts|typescript)\n([\s\S]+)/i);
+                const cont = (fenced ? fenced[1] : prefixed ? prefixed[1] : "").trim();
+                if (!cont || cont.length < 20) {
+                  log(colors.yellow(`  [Graph] -> Nuclear continuation ${contAttempt + 1} returned no code (preview: ${contText.slice(0, 150).replace(/\n/g, "↵")}) — skipping`));
+                } else {
+                  try {
+                    await appendFile(pfAbs, "\n\n// === Section " + (contAttempt + 2) + " ===\n" + cont);
+                    log(colors.green(`  [Graph] -> Nuclear continuation appended (${cont.length} chars) to ${path.basename(pfAbs)}`));
+                  } catch { break; }
+                }
+              }
+            }
+          }
+
+          // Second nuclear attempt: fresh session + seed-code completion.
+          // "Write the complete X code" prompts often echo back for DeepSeek.
+          // Giving it a code prefix to complete is much harder to echo.
+          if (!proseCodeExtracted && isLimitedOutputProvider && plannedFiles.length > 0 && state.projectDir) {
+            log(colors.yellow(`  [Graph] -> Nuclear attempt 1 failed — trying seed-code completion (attempt 2)`));
+            const pf2 = plannedFiles.find(f => [".js", ".ts", ".jsx", ".tsx"].includes(path.extname(f).toLowerCase())) || plannedFiles[0] || "file.js";
+            const ext2 = path.extname(pf2).toLowerCase();
+            const lang2 = ext2.replace(".", "") || "js";
+            const absTarget2x = path.isAbsolute(pf2) ? pf2 : path.join(state.projectDir, pf2);
+
+            // Static seed: data/constant definitions — functions added by continuations.
+            const jsDataSeed = [
+              `// game.js — Slay the Spire browser card game`,
+              `const CARDS = {`,
+              `  strike: { id: 'strike', name: 'Strike', cost: 1, damage: 6, type: 'attack' },`,
+              `  defend: { id: 'defend', name: 'Defend', cost: 1, block: 5, type: 'skill' },`,
+              `  bash: { id: 'bash', name: 'Bash', cost: 2, damage: 8, vulnerable: 2, type: 'attack' },`,
+              `  shrugItOff: { id: 'shrugItOff', name: 'Shrug It Off', cost: 1, block: 8, draw: 1, type: 'skill' },`,
+              `};`,
+              `const ENEMIES = [`,
+              `  { name: 'Jaw Worm', hp: 28, maxHp: 28, block: 0, vulnerable: 0, pattern: ['attack8', 'attack8', 'block'], patternIndex: 0 },`,
+              `  { name: 'Cultist', hp: 20, maxHp: 20, block: 0, vulnerable: 0, pattern: ['attack6', 'attack6', 'buff'], patternIndex: 0 },`,
+              `  { name: 'Louse', hp: 15, maxHp: 15, block: 0, vulnerable: 0, pattern: ['attack5', 'attack5', 'attack5'], patternIndex: 0 },`,
+              `];`,
+              `const HEXAGHOST = { name: 'Hexaghost', hp: 50, maxHp: 50, block: 0, vulnerable: 0, pattern: ['attack15', 'attack15', 'attack15'], patternIndex: 0 };`,
+              `let gameState = { floor: 1, player: { hp: 80, maxHp: 80, block: 0, energy: 3, maxEnergy: 3, hand: [], drawPile: [], discardPile: [] }, enemy: null };`,
+            ].join("\n");
+
+            const seedPrompt = [
+              `Complete this JavaScript file (output ONLY the full implementation in a \`\`\`${lang2}\`\`\` code block):`,
+              `\`\`\`${lang2}`,
+              jsDataSeed,
+              `\`\`\``,
+              `Add: shuffle(), initGame(), startCombat(), nextFloor(), playCard(), applyDamageToEnemy(), applyDamageToPlayer(), addBlockToPlayer(), enemyTurn(), endTurn(), updateDisplay(), renderHand(), showRewards(), showVictory(), showDefeat(), event listeners, DOMContentLoaded init.`,
+            ].join("\n");
+
+            try { await state.provider.startNewChat?.(); } catch (_) {}
+            const nuclear2Context = { ...context, interactionMode: "scoping", skipConstraint: true };
+            let nuclear2Result;
+            try { nuclear2Result = await state.provider.sendTurn([{ role: "user", content: seedPrompt }], "nuclear-2", nuclear2Context); } catch (_) {}
+            if (nuclear2Result) await handleNuclearResult(nuclear2Result);
+
+            // Nuclear-3: if seed-completion also failed, write static seed and run standalone continuations.
+            if (!proseCodeExtracted) {
+              log(colors.yellow(`  [Graph] -> Nuclear attempt 2 failed — writing static seed + continuations (attempt 3)`));
+              try {
+                await writeFile(absTarget2x, jsDataSeed + "\n");
+                modifiedFiles.push(absTarget2x);
+                proseCodeExtracted = true;
+                log(colors.green(`  [Graph] -> Static seed written to ${path.basename(absTarget2x)} — running nuclear-3 continuations`));
+              } catch (_) {}
+            }
+
+            // Run continuation prompts for nuclear-2 (seed completion) or nuclear-3 (static seed).
+            if (proseCodeExtracted) {
+              // "functions only" prompts — no top-level const/let so appended sections
+              // don't redeclare globals that already exist in the seed.
+              const appendPrompts3 = [
+                `Write only JS function defs (no globals). gameState.player{hp,block,energy,maxEnergy,hand[],drawPile[],discardPile[]}; gameState.enemy{hp,block,vulnerable}. shuffle(arr) Fisher-Yates; drawCard() pop from drawPile,reshuffle from discardPile if empty; playCard(id) uses CARDS[id],costs energy,damages enemy or blocks player,splice from hand,push to discardPile,renderHand,updateDisplay; applyDamageToEnemy(n) x1.5 if vulnerable,showRewards if hp<=0; applyDamageToPlayer(n) block absorbs,showDefeat if hp<=0; addBlockToPlayer(n). Output \`\`\`js\`\`\` block.`,
+                `Write only JS function defs (no globals). gameState{floor,player{block,energy,maxEnergy,hand[],discardPile[]},enemy{hp,block,vulnerable,pattern[],patternIndex}}. Pattern: 'attackN'→applyDamageToPlayer(N),'buff'→enemy.block+=5,'block'→enemy.block+=5,else→enemy.vulnerable=2. enemyTurn() acts on pattern[patternIndex%len],patternIndex++,updateDisplay; endTurn() discard hand,reset block+energy,enemyTurn,draw 5 cards,updateDisplay; nextFloor() floor++,>4 showVictory else startCombat. Output \`\`\`js\`\`\` block.`,
+                `Write only JS function defs (no globals). DOM IDs: hero-hp,hero-energy,hero-block,enemy-name,enemy-hp,enemy-block,hand,end-turn-btn,reward-section,reward-cards,continue-btn,win-lose-screen,win-lose-title,reset-btn. updateDisplay() fills DOM from gameState.player+enemy; renderHand() creates card buttons onclick=playCard(id); showRewards() shows 3 random CARDS to pick; showVictory/showDefeat toggle win-lose-screen; startCombat() picks ENEMIES[rand] or HEXAGHOST if floor>=5,resets state,draws 5; initGame() sets gameState,5×strike+4×defend+1×bash shuffled,startCombat; DOMContentLoaded→initGame. Output \`\`\`js\`\`\` block.`,
+              ];
+              const contContext3 = { ...context, interactionMode: "scoping", skipConstraint: true };
+              for (let ci = 0; ci < appendPrompts3.length; ci++) {
+                try { await readFile(absTarget2x, "utf-8"); } catch { break; }
+                const prompt3 = appendPrompts3[ci];
+                log(colors.yellow(`  [Graph] -> Nuclear-3 continuation ${ci + 1}/${appendPrompts3.length} — appending to ${path.basename(absTarget2x)}`));
+                // Fresh session per section — standalone prompts need no prior context.
+                try { await state.provider.startNewChat?.(); } catch (_) {}
+                let contResult3;
+                try { contResult3 = await state.provider.sendTurn([{ role: "user", content: prompt3 }], `nuclear-3-cont-${ci + 1}`, contContext3); } catch { break; }
+                const contText3 = contResult3?.text ?? "";
+                const fenced3 = contText3.match(/```(?:\w+)?\n([\s\S]*?)```/i);
+                const prefixed3 = contText3.match(/^(?:js|javascript|ts|typescript)\n([\s\S]+)/i)
+                  || contText3.match(/\n(?:js|javascript|ts|typescript)\n([\s\S]+)/i);
+                const cont3 = (fenced3 ? fenced3[1] : prefixed3 ? prefixed3[1] : "").trim();
+                if (!cont3 || cont3.length < 20) {
+                  log(colors.yellow(`  [Graph] -> Nuclear-3 continuation ${ci + 1} returned no code (preview: ${contText3.slice(0, 150).replace(/\n/g, "↵")}) — skipping`));
+                } else {
+                  try {
+                    await appendFile(absTarget2x, `\n\n// === Section ${ci + 2} ===\n` + cont3);
+                    log(colors.green(`  [Graph] -> Nuclear-3 continuation ${ci + 1} appended (${cont3.length} chars)`));
+                  } catch { break; }
+                }
+              }
+            }
+
+            if (!proseCodeExtracted) log(colors.yellow(`  [Graph] -> All nuclear attempts failed — continuing to verifier`));
+          } else if (!proseCodeExtracted) {
             log(colors.yellow(`  [Graph] -> Nuclear prose-retry also produced no tool calls — continuing to verifier`));
           }
         } catch (nuclearErr) {
           log(colors.yellow(`  [Graph] -> Nuclear prose-retry failed (${nuclearErr.message}) — continuing`));
         }
+        // Reset session after nuclear work so the next coder retry starts clean
+        // rather than reusing a just-completed session (causes "input did not clear").
+        try { await state.provider.startNewChat?.(); } catch (_) {}
+        } // end if (!proseCodeExtracted)
       }
     }
   }
@@ -1466,5 +1894,8 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
     toolPlan: parsedToolPlan,
     toolRewardLog: toolRewardEntries,
     consecutiveStallCount: 0, // reset on successful turn
+    // When nuclear wrote the file directly for a limited-output provider (DeepSeek),
+    // skip patch review — the coder can't implement patch feedback for this provider type.
+    nuclearExtracted: proseCodeExtracted && isLimitedOutputProvider,
   };
 }

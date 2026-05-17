@@ -29,6 +29,7 @@ export async function runAutomationApiTurn({
     readOnly = false,
     allowedDirs = [],
     signal = null,
+    skipConstraint = false,
   } = options;
 
   const toolContext = { rootDir, ignore, allowedDirs, readOnly };
@@ -52,7 +53,7 @@ export async function runAutomationApiTurn({
 
   while (true) {
     try {
-      initialResponse = await sendAutomationTurn({ state, promptText, label, signal });
+      initialResponse = await sendAutomationTurn({ state, promptText, label, signal, rootDir, skipConstraint });
       break;
     } catch (err) {
       if (err.selfHealEscape) throw err;

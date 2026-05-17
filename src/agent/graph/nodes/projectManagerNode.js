@@ -319,7 +319,7 @@ Each subtask MUST include:
 - "task": ONE-LINE action verb + object (e.g. "Add rememberMe parameter to AuthService.login() in src/auth/AuthService.ts lines 45-72")
 - "files": array of exact file paths (relative to project root) verified in the Scope Document
 - "line_range": the specific line range(s) to modify, as a string (e.g. "45-72" or "45-72, 110-115"). Use "new file" if creating.
-- "implementation_note": a VERBATIM QUOTE or paraphrase from the Scope Document describing exactly what needs to change at those lines - current state and desired state. Must be concrete enough for the coder to write the change without reading any other file.
+- "implementation_note": ≤ 350 chars. Describe WHAT to create or change — the purpose and key structure. For new-file tasks, name the key sections/features to implement. Do NOT reproduce full code, HTML structure, or lengthy specifications; the coder has the original task description. Quote specific identifiers, APIs, or field names that the coder must use.
 - "constraints": method signatures, class names, import paths, migration notes from scope
 
 CRITICAL RULES:
@@ -340,7 +340,7 @@ CSS FILE CONSOLIDATION (CRITICAL for React/Vue/Vite projects — prevents styles
 BYTE-SIZED SUBTASK RULES (CRITICAL — enforced by the pipeline):
 - Each implementation subtask MUST touch at most 3 files. If a change requires more, split it into multiple subtasks.
 - Prefer 6–12 subtasks for a medium feature. More subtasks = better visibility, easier resume, less hallucination.
-- For new_project tasks: maximum 7 subtasks total (consolidate related work into fewer, larger subtasks). Grouping related concerns — e.g. all game logic in one subtask, all UI components in one subtask — is preferred over creating a separate subtask for each file.
+- For new_project tasks: maximum 7 subtasks total UNLESS the project requires large files (see WRITE_FILE SIZE LIMIT below). Grouping related concerns — e.g. all game logic in one subtask, all UI components in one subtask — is preferred over creating a separate subtask for each file.
 - Each subtask should be completable in one AI response. If a subtask would require writing more than 5 files, either split it into two focused subtasks or merge it with a closely related subtask so the combined scope stays under 5 files.
 - NEVER write subtasks like "Implement the entire X module", "Refactor all Y files", or "Update everything in Z". These always exceed 3 files and stall the session.
 - Each subtask description must fit in one sentence (≤ 20 words). If you need more words, split the subtask.
@@ -350,6 +350,7 @@ BYTE-SIZED SUBTASK RULES (CRITICAL — enforced by the pipeline):
 - If the Scope Document lists an implementation order, respect it
 - IMPLEMENTATION-BEFORE-TEST ORDERING (CRITICAL — prevents "Cannot find module" failures): If any subtask writes a test file that imports from a new source module that does not yet exist (e.g. \`import { add } from './calc'\` where calc.js is being created as part of this plan), the subtask that CREATES the source module MUST appear BEFORE the test subtask in the plan. NEVER place a test file creation subtask before the source file it imports — the test will always fail with "Cannot find module" and trigger an infinite retry loop. Rule: scan each test file subtask's implementationNote for import statements; if the imported path is a new file being created in this plan, ensure its creation subtask has a lower id.
 - JSON ESCAPING (CRITICAL — failure causes the entire plan to be rejected and retried): Any double-quote character INSIDE a string value MUST be escaped as \". This ESPECIALLY applies to code examples in implementation_note that contain string literals. WRONG: "implementation_note": "Call emit("phase_change", {label: "Searching..."})". RIGHT: "implementation_note": "Call emit('phase_change', {label: 'Searching...'})". RULE: In implementation_note code examples, replace all double-quote characters in the code with single quotes (JS, PHP, Python all support single-quoted strings). For JSON content that must use double quotes, escape as \\". Output ONLY raw JSON — no markdown fences, no prose before the opening {.
+- WRITE_FILE SIZE LIMIT (CRITICAL — prevents output truncation): Each write_file subtask must output at most 40 lines of code in the file content. This limit exists because the AI writing the code has a strict character output budget; a single write_file call with 100+ lines will be truncated mid-file and produce broken code. Rules: (1) For any file that requires more than 40 lines total (game JS, CSS stylesheets, large HTML), split it across multiple subtasks: the FIRST subtask uses write_file for the opening section (≤40 lines); EACH SUBSEQUENT subtask uses patch_file with search_block set to the last unique line of the previously-written section, and replacement set to that anchor line PLUS the next ≤40 lines to append. (2) This means a 120-line game.js needs 3 subtasks: write_file lines 1-40, patch_file append lines 41-80, patch_file append lines 81-120. (3) The 7-subtask cap for new_project tasks does NOT apply when large files require splitting — use as many subtasks as needed to stay under 40 lines each. (4) Name split subtasks clearly: "Write game.js skeleton (constants and card data)", "Append game.js enemy data and state", "Append game.js combat functions", etc.
 
 TEMPLATE FILE CHANGES — REMOVE vs APPEND (CRITICAL — prevents dual-rendering bugs):
 When a subtask modifies a template file (.ss, .html, .erb, .twig, etc.), implementation_note MUST specify BOTH:
@@ -477,7 +478,7 @@ NEW_PROJECT MODE — You are building a brand-new application from scratch. Ther
 - First subtask must install dependencies (npm install) AND create tsconfig.json, vite.config.ts, index.html, package.json WITH all required deps (including eslint-plugin-react-hooks for React projects). Verify npm run build succeeds.
 - Last subtask should be a full integration: wire all components together and verify the app runs (npm run dev starts without errors, npm run build exits 0).
 - implementation_note must describe WHAT TO CREATE, not what to modify.
-- For new project tasks, prefer fewer larger subtasks over many small ones. A subtask implementing an entire game hook (200-400 lines) is better than 3 subtasks each touching the same file.
+- For new project tasks, each subtask must write at most 40 lines per write_file or patch_file call (see WRITE_FILE SIZE LIMIT above). A 200-line game.js MUST be split into 5 subtasks of 40 lines each — NOT written in one subtask. More subtasks is correct here.
 
 REACT GAME PROJECT SUBTASK RULES:
 - The scaffold subtask MUST include eslint-plugin-react-hooks in devDependencies and configure it in eslint.config.js
@@ -901,7 +902,8 @@ The prompt already specifies the exact file, exact line, and exact change needed
     // Synthesize subtasks from the original task rather than blocking the session.
     // Also applies to chunked providers (e.g. Copilot) that can't handle large PM prompts.
     const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
-    if (state.taskType === "direct_fix" || state.taskType === "quick_edit" || isChunkedProvider) {
+    const isLimitedOutputProvider = state.provider?.providerName === "deepseek";
+    if (state.taskType === "direct_fix" || state.taskType === "quick_edit" || isChunkedProvider || isLimitedOutputProvider) {
       const originalTask = state.messages[0]?.content || "Fix the bug described in the task";
       // Extract all referenced file paths from the task description.
       const fileMatches = [...new Set(
@@ -909,11 +911,50 @@ The prompt already specifies the exact file, exact line, and exact change needed
           .filter((f) => !f.startsWith(".") && f.length < 60)
       )];
       const files = fileMatches.length > 0 ? fileMatches : [];
+
+      // For chunked providers (Copilot, 9500 char limit) and limited-output providers (DeepSeek,
+      // ~3000 char visible output), building one subtask with all files is either too large or
+      // produces truncated PM JSON. Split multi-file new projects into one subtask per file so each
+      // coder turn is focused and fits within output constraints.
+      // implementationNote is truncated to 1200 chars so the per-file prompt stays under budget.
+      const implNote = originalTask.slice(0, 1200);
+      if ((isChunkedProvider || isLimitedOutputProvider) && files.length > 1 && state.taskType !== "direct_fix" && state.taskType !== "quick_edit") {
+        // Skip files that already exist so we don't overwrite them (e.g. index.html committed by user).
+        const newFiles = [];
+        for (const file of files) {
+          const absPath = state.projectDir
+            ? (path.isAbsolute(file) ? file : path.join(state.projectDir, file))
+            : null;
+          if (absPath) {
+            try {
+              await fs.access(absPath);
+              log(colors.dim(`  [Graph] -> PM fallback: skipping ${file} (already exists)`));
+            } catch {
+              newFiles.push(file);
+            }
+          } else {
+            newFiles.push(file);
+          }
+        }
+        const filesToCreate = newFiles.length > 0 ? newFiles : files;
+        log(colors.yellow(`  [Graph] -> PM fallback: splitting into ${filesToCreate.length} per-file subtasks for limited-output provider (${filesToCreate.join(", ")})`));
+        return {
+          subtasks: filesToCreate.map((file) => ({
+            task: `Create ${file}`,
+            implementationNote: implNote,
+            files: [file],
+            acceptanceCriteria: `${file} is correctly implemented as part of the project`,
+            failureCriteria: "File is missing, empty, or contains placeholder content",
+          })),
+          executionPlan: `Build project: ${originalTask.slice(0, 100)}`,
+        };
+      }
+
       log(colors.yellow(`  [Graph] -> PM fallback: synthesizing subtask from prompt (files: ${files.join(", ") || "none"})`));
       return {
         subtasks: [{
           task: originalTask.slice(0, 500),
-          implementationNote: originalTask,
+          implementationNote: implNote,
           files,
           acceptanceCriteria: "Implementation matches the fix described in the task",
           failureCriteria: "N/A",

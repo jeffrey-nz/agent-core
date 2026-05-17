@@ -334,6 +334,11 @@ export async function runAutomationAgentLoop({
           rawText.trimStart().startsWith("public ") ||
           rawText.trimStart().startsWith("class ");
 
+        // Derive the expected filename from the label (e.g. "Create game.js" → "game.js")
+        // so correction hints show a concrete path instead of a copyable placeholder.
+        const _fileFromLabel = (/\b(\w[\w.-]+\.\w{1,5})\b/.exec(state.label || ""))?.[1];
+        const _examplePath = _fileFromLabel ? `${state.rootDir}/${_fileFromLabel}` : `${state.rootDir}/file.js`;
+
         const hint = isReadOnly
           ? `You are in a read-only research/scoping phase. If you have finished exploring, respond with an empty array:\n` +
             `\`\`\`json\n[]\n\`\`\`\n\n` +
@@ -341,16 +346,20 @@ export async function runAutomationAgentLoop({
             `\`\`\`json\n[\n  { "tool": "read_file", "path": "${state.rootDir}/src/filename.js" }\n]\n\`\`\`\n\n` +
             `Do NOT output prose — use \`\`\`json\n[]\n\`\`\` if done.`
           : looksLikeProse
-          ? `Your response was plain text with no JSON. You MUST output ONLY a JSON array starting with [ and ending with ].\n\n` +
-            `If your subtask is complete, output:\n[\n  { "tool": "execute_bash", "command": "echo done" }\n]\n\n` +
+          ? `Your response was plain text with no JSON. You MUST output ONLY a JSON array in a \`\`\`json code block.\n\n` +
+            `If your subtask is complete, output:\n\`\`\`json\n[]\n\`\`\`\n\n` +
             `If you need to write a file, output:\n` +
-            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.ts", "content": "your content here" }\n]\n\n` +
-            `NEVER output explanatory prose. Respond with JSON only.`
+            `\`\`\`json\n[\n  { "tool": "write_file", "path": "${_examplePath}", "content": "/* YOUR FULL CODE */" }\n]\n\`\`\`\n\n` +
+            `Replace /* YOUR FULL CODE */ with the REAL implementation — do not use placeholder text.\n` +
+            `The path MUST start with ${state.rootDir} and must be the exact path from "File(s) to create" in your task.\n` +
+            `NEVER output explanatory prose. Respond with a \`\`\`json code block only.`
           : looksLikeCode
-          ? `Your response appears to be raw code or plain text rather than a JSON tool call array.\n\n` +
-            `You MUST respond with a JSON array of tool objects, not raw code.\n` +
-            `Use a REAL path under ${state.rootDir}. Example:\n` +
-            `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/filename.js", "content": "..." }\n]\n\n` +
+          ? `Your response appears to be raw code rather than a JSON tool call array.\n\n` +
+            `You MUST respond with a \`\`\`json code block containing an array of tool objects.\n` +
+            `The write_file path MUST start with ${state.rootDir} and be the exact path from "File(s) to create" in your task.\n` +
+            `Example structure:\n` +
+            `\`\`\`json\n[\n  { "tool": "write_file", "path": "${_examplePath}", "content": "/* YOUR FULL CODE */" }\n]\n\`\`\`\n\n` +
+            `Replace /* YOUR FULL CODE */ with the REAL implementation — do not use placeholder text.\n` +
             `Put the actual file content inside the "content" string — do not write it out directly.`
           : `This is most commonly caused by unescaped double quotes inside a string value. ` +
             `All " characters inside a JSON string must be written as \\". ` +
@@ -621,6 +630,12 @@ export async function runAutomationAgentLoop({
           // Must be an absolute path under rootDir (or one of the allowed dirs)
           if (!p.startsWith("/")) return true; // relative path
           if (state.rootDir && !p.startsWith(state.rootDir)) return true; // outside project
+          // Catch FORMAT REQUIREMENT placeholder filenames copied verbatim by the model
+          const base = p.split("/").pop() || "";
+          if (/^__placeholder__\.|^YOURFILE\.|^YOUR_FILE\.|^your-file-here\.|^filename\.(ext|ts|js|jsx|tsx|css|html)$|^placeholder\.ext$|^file$|^file\.js$|^file\.ts$|^filename\.js$|^filename\.ts$/i.test(base)) return true;
+          // Catch template paths from correction/format messages copied verbatim
+          if (p === "/abs/path/to/file" || p === "/path/to/file.ext" || p === "/path/to/file.js") return true;
+          if (/THE_ABSOLUTE_PATH_FROM_YOUR_TASK|YOUR_FILE_HERE|\$YOUR_FILE_PATH|\$FILE_PATH/i.test(p)) return true;
           return false;
         };
         // Only check write_file/patch_file calls — reads may legitimately point elsewhere
@@ -642,19 +657,67 @@ export async function runAutomationAgentLoop({
             break;
           }
           const badPath = (writeCalls[0]?.path || writeCalls[0]?.args?.path || "?");
+          const _plFileFromLabel = (/\b(\w[\w.-]+\.\w{1,5})\b/.exec(state.label || ""))?.[1];
+          const _plExamplePath = _plFileFromLabel ? `${state.rootDir}/${_plFileFromLabel}` : `${state.rootDir}/file.js`;
           log(colors.yellow(`  [Protocol] ${state.label}: write_file path "${badPath}" is outside project — injecting correction (${consecutiveProse}/${MAX_PROSE_RETRIES}).`));
           state.responseText = await state.send(
             state.remoteSessionId,
             `[WRONG PATH — attempt ${consecutiveProse}/${MAX_PROSE_RETRIES}]\n\n` +
-              `You used "${badPath}" which is not under the project root.\n` +
-              `The actual project is at: ${state.rootDir}\n\n` +
-              `All file paths MUST start with ${state.rootDir}, for example:\n` +
-              `[\n  { "tool": "write_file", "path": "${state.rootDir}/src/types.ts", "content": "..." }\n]\n\n` +
-              `Use ONLY absolute paths that start with ${state.rootDir}.`,
+              `You used "${badPath}" — that is a placeholder, NOT a real project file.\n` +
+              `The correct path starts with ${state.rootDir}. Check "File(s) to create" in your task above — it lists the exact path (e.g. ${_plExamplePath}).\n` +
+              `Do NOT use placeholder paths or example paths. Write your tool call now with the correct absolute path.`,
             `${state.label} [placeholder-path ${consecutiveProse}/${MAX_PROSE_RETRIES}]`,
           );
           state.consecutiveNoActivity = 0;
           continue;
+        }
+      }
+
+      // ── Empty-content write guard (BEFORE executeStep) ───────────────────────
+      // Block write_file/patch_file calls with empty content — they would erase
+      // existing files. Surface the calls to state.toolCalls so coderNode's allEmpty
+      // guard fires nuclear instead of executing a file wipe.
+      {
+        const writeToolNames = new Set(["write_file", "patch_file"]);
+        const writeCalls = parsed.jsonToolCalls.filter(tc =>
+          writeToolNames.has(tc.tool || tc.name || "")
+        );
+        const allEmpty = writeCalls.length > 0 && writeCalls.every(tc => {
+          const c = tc.content ?? tc.args?.content ?? tc.input?.content ??
+                    tc.replacement ?? tc.args?.replacement ?? tc.input?.replacement ?? "";
+          return typeof c === "string" && c.trim().length === 0;
+        });
+        if (allEmpty) {
+          const emptyPath = writeCalls[0]?.path || writeCalls[0]?.args?.path || "?";
+          log(colors.yellow(`  [Protocol] ${state.label}: write_file content empty for "${emptyPath}" — aborting to trigger nuclear (not executing wipe).`));
+          // Push empty calls into state.toolCalls so coderNode's allEmpty check sees them
+          // and fires the nuclear retry path rather than treating this as a hard failure.
+          for (const tc of writeCalls) state.toolCalls.push(tc);
+          state.aborted = true;
+          break;
+        }
+        // ── Placeholder-content guard ────────────────────────────────────────────
+        // Catch content that is literally the example text from correction hints
+        // (e.g. DeepSeek copies "complete file content" or "/* YOUR FULL CODE */"
+        // verbatim from the format example). Treat these like empty writes.
+        const PLACEHOLDER_CONTENT_PATTERNS = [
+          /^complete file content$/i,
+          /^\/\* YOUR FULL CODE \*\/$|^\/\* YOUR FULL CODE \*\/\s*$/i,
+          /^\[INSERT YOUR CODE HERE\]$/i,
+          /^your code here$/i,
+          /^\/\/ your complete file content here$/i,
+          /^\/\/ full implementation$/i,
+        ];
+        const allPlaceholderContent = writeCalls.length > 0 && writeCalls.every(tc => {
+          const c = (tc.content ?? tc.args?.content ?? tc.input?.content ?? "").trim();
+          return PLACEHOLDER_CONTENT_PATTERNS.some(re => re.test(c));
+        });
+        if (allPlaceholderContent) {
+          const plPath = writeCalls[0]?.path || writeCalls[0]?.args?.path || "?";
+          log(colors.yellow(`  [Protocol] ${state.label}: write_file has placeholder content for "${plPath}" — aborting to trigger nuclear.`));
+          for (const tc of writeCalls) state.toolCalls.push(tc);
+          state.aborted = true;
+          break;
         }
       }
 

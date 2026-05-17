@@ -34,6 +34,29 @@ export async function executeStep(state, parsed, step) {
       return;
     }
 
+    // DeepSeek: skip tool-result follow-up entirely after any write_file.
+    // DeepSeek is a single-shot limited-output provider — after generating a large
+    // file response the UI can't accept a second submission (HTTP 500 "input did
+    // not clear"). Execute tools to write the files but return [] instead of
+    // sending the tool result back.  This also handles the empty-content case.
+    const isDeepSeek = state.providerName === "deepseek";
+    if (isDeepSeek && jsonToolCalls.length > 0) {
+      const hasWriteFile = jsonToolCalls.some(tc => {
+        const name = (tc.tool || tc.name || "");
+        return name === "write_file" || name === "patch_file";
+      });
+      if (hasWriteFile) {
+        await buildJsonToolsFollowUp({
+          jsonToolCalls,
+          toolContext: state.toolContext,
+          toolCalls: state.toolCalls,
+          executionErrors: state.executionErrors,
+        });
+        state.responseText = "[]"; // signal done — don't send result back to DeepSeek
+        return;
+      }
+    }
+
     state.responseText = await state.send(
       state.remoteSessionId,
       await buildJsonToolsFollowUp({

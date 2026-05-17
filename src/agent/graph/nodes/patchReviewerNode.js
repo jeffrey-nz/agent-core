@@ -421,6 +421,14 @@ export async function patchReviewerNode(state) {
     return { patchReviewFeedback: "OK" };
   }
 
+  // Skip when nuclear wrote the file directly for a limited-output provider (e.g. DeepSeek).
+  // The coder cannot implement patch feedback for this provider type — the nuclear result
+  // is as good as it gets, so let the verifier judge it directly.
+  if (state.nuclearExtracted) {
+    log(colors.dim(`  [PatchReview] Nuclear extraction — skipping review for limited-output provider`));
+    return { patchReviewFeedback: "OK" };
+  }
+
   // Skip if there are no modified files to review
   const modifiedFiles = state.modifiedFiles || [];
   if (modifiedFiles.length === 0) {
@@ -507,8 +515,10 @@ export async function patchReviewerNode(state) {
     const stubCssPattern = /\/\*\s*(existing|previous|original|prior)\s+\w+.*(would|normally|should|already).*(be|is|are)\s+(defined|present|above|here|in\s+place)/i;
     // Also catch "...full content..." / "...existing code..." triple-dot placeholders
     // written by Copilot when it hits context limits and can't write the actual file.
-    const tripleDotPlaceholder = /^\s*\.\.\.(full content|existing content|existing code|rest of file|rest of code|previous content|original code)\.\.\.\s*$/im;
-    if (stubCommentPattern.test(content) || stubCssPattern.test(content) || tripleDotPlaceholder.test(content)) {
+    const tripleDotPlaceholder = /^\s*\.\.\.(full file content|full content|existing content|existing code|rest of file|rest of code|previous content|original code)\.\.\.\s*$/im;
+    // Catch nuclear retry template placeholders copied verbatim: "YOUR COMPLETE X CODE HERE", "<insert ... here>"
+    const nuclearPlaceholder = /^(YOUR COMPLETE \w+ CODE HERE|<insert complete .+ here>)$/im;
+    if (stubCommentPattern.test(content) || stubCssPattern.test(content) || tripleDotPlaceholder.test(content) || nuclearPlaceholder.test(content)) {
       allIssues.push({
         file: relPath,
         type: "STUB_COMMENT",

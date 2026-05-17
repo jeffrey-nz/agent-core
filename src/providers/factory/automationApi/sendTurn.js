@@ -1,7 +1,7 @@
 import { sendWithChunking } from "../chunking.js";
 import { sendRemoteTurn } from "../../api/interaction.js";
 
-export async function sendAutomationTurn({ state, promptText, label, signal }) {
+export async function sendAutomationTurn({ state, promptText, label, signal, rootDir = null, skipConstraint = false }) {
   const maxChars = state.maxPromptChars || 118000;
   const chunkSize = Math.floor(maxChars * 0.98);
 
@@ -16,7 +16,11 @@ export async function sendAutomationTurn({ state, promptText, label, signal }) {
     label,
     chunkSize,
     send: async (sid, text, lbl) => {
-      const result = await sendRemoteTurn(sid, text, lbl, signal, { attachments });
+      const result = await sendRemoteTurn(sid, text, lbl, signal, {
+        attachments,
+        projectDir: rootDir || null,
+        skipConstraint,
+      });
       state.messageCount = result.messageCount ?? state.messageCount ?? 0;
       return result.text;
     },

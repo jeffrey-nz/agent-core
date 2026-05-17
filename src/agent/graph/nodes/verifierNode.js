@@ -2168,13 +2168,34 @@ DEBUGGING STRATEGY:
           Array.from(sessionWritten).some((w) => w.endsWith(f) || f.endsWith(path.basename(w)));
       });
       if (allWrittenByAgent) {
-        log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) were already modified by the agent this session — auto-passing subtask.`));
-        emitTaskCompleted(state);
-        const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
-        await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
-        await closeSubIssueForSubtask(state);
-        writeVerificationMarker();
-        return { verifierFeedback: "PASS" };
+        // Suppress auto-pass when the previously-written JS file(s) are too small
+        // (< 800 chars) — a skeleton written by an earlier subtask should not
+        // block a later subtask that needs to add full game/app logic.
+        let hasMinimalJsFile = false;
+        for (const f of subtaskFilesForAutoPass) {
+          const ext = path.extname(f).toLowerCase();
+          if (![".js", ".ts", ".jsx", ".tsx"].includes(ext)) continue;
+          const abs = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
+          try {
+            const content = fs.readFileSync(abs, "utf-8");
+            if (content.length < 800) { hasMinimalJsFile = true; break; }
+          } catch {
+            // File doesn't exist — suppress auto-pass so the coder actually writes it.
+            hasMinimalJsFile = true; break;
+          }
+        }
+        if (hasMinimalJsFile) {
+          log(colors.yellow(`  [Graph] -> Auto-pass suppressed: planned JS file(s) have minimal content (<800 chars) — letting coder add full implementation.`));
+          // Fall through to the normal no-files-written retry path below.
+        } else {
+          log(colors.yellow(`  [Graph] -> No files written, but all ${subtaskFilesForAutoPass.length} planned file(s) were already modified by the agent this session — auto-passing subtask.`));
+          emitTaskCompleted(state);
+          const taskLabelAutoPass = state.subtasks?.[state.currentSubtaskIndex]?.task || "subtask";
+          await commitVerifiedSubtask(state.projectDir, taskLabelAutoPass);
+          await closeSubIssueForSubtask(state);
+          writeVerificationMarker();
+          return { verifierFeedback: "PASS" };
+        }
       }
     }
 
@@ -2748,16 +2769,26 @@ Do NOT output [] without reading the JS module first. The verifier checks your r
               }
               await browser.close();
 
-              if (missingIds.length > 0 || consoleErrors.length > 0) {
+              // Filter out "file not found" errors — expected when writing a multi-file project
+              // incrementally (e.g. index.html written before game.js/style.css exist). These are
+              // collateral failures that will resolve once the other subtasks run. Real JS syntax
+              // and runtime errors should still block.
+              const realConsoleErrors = consoleErrors.filter(e =>
+                !e.includes("Failed to load resource") &&
+                !e.includes("net::ERR_") &&
+                !e.includes("ERR_FILE_NOT_FOUND")
+              );
+
+              if (missingIds.length > 0 || realConsoleErrors.length > 0) {
                 const missingDesc = missingIds.length > 0
                   ? `\nMissing HTML elements (getElementById returns null):\n${missingIds.map(id => `  • id="${id}"`).join("\n")}`
                   : "";
-                const errDesc = consoleErrors.length > 0
-                  ? `\nBrowser console errors:\n${consoleErrors.slice(0, 5).map(e => `  • ${e}`).join("\n")}`
+                const errDesc = realConsoleErrors.length > 0
+                  ? `\nBrowser console errors:\n${realConsoleErrors.slice(0, 5).map(e => `  • ${e}`).join("\n")}`
                   : "";
                 const newRetry = (state.coderRetryCount ?? 0) + 1;
                 log(colors.yellow(
-                  `  [Verifier] Headless render: ${missingIds.length} missing id(s), ${consoleErrors.length} console error(s)`,
+                  `  [Verifier] Headless render: ${missingIds.length} missing id(s), ${realConsoleErrors.length} real error(s) (${consoleErrors.length - realConsoleErrors.length} resource-not-found filtered)`,
                 ));
                 return {
                   verifierFeedback: "FAIL",
@@ -2852,11 +2883,12 @@ ${dupVarDesc}${dupEvtDesc}
 
 ROOT CAUSE: You appended a new code block without removing the old one. The file now has the same logic twice.
 
-REQUIRED FIX — use write_file to rewrite the ENTIRE function:
+REQUIRED FIX:
 1. Read the current file with read_file
 2. Find all duplicate blocks — keep ONLY the best/most complete version
-3. Remove all duplicate var declarations and duplicate event registrations
-4. Use write_file to write the complete corrected file (do NOT use patch_file — the structure is broken)
+3. Use patch_file to replace the entire function body with a deduplicated version
+   (patch_file is preferred — it sends only the changed section and avoids generation timeouts on large files)
+   Only use write_file if the file is under 50 lines total.
 
 The corrected wireEvents() (or equivalent) should register each event EXACTLY ONCE.
 

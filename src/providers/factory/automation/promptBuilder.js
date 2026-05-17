@@ -114,7 +114,43 @@ Write ALL required files by repeating this pattern. After all files, output: TAS
 - For a new project: write ALL files immediately, do not wait.
 ${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}`;
           } else {
-            content += `
+            const isDeepSeek = providerName === "deepseek";
+            if (isDeepSeek) {
+              // DeepSeek-specific BATCH EXECUTION PROTOCOL:
+              // 1. Must wrap JSON in ```json blocks (aligns with FORMAT REQUIREMENT).
+              // 2. No example JSON paths/content — DeepSeek copies placeholder values literally.
+              content += `
+
+Project root: ${rootDir}
+
+## TOOL SCHEMA
+${buildCoreTools(rootDir)}
+${diagnosticsTool}${EXTENDED_TOOLS}
+
+## BATCH EXECUTION PROTOCOL
+
+Output ALL tool calls in ONE JSON array, wrapped in a \`\`\`json code block.
+Use write_file with the ACTUAL file path and the COMPLETE file content.
+
+When all files for the current task are written, output: TASK_DONE
+
+## RULES
+- ${pathsRule}
+- ALWAYS wrap the JSON array in a \`\`\`json code block — never output raw JSON
+- Put the COMPLETE file content in the "content" field — never truncate or use placeholders
+- Write to the ACTUAL file paths listed in your subtask — not example paths from this prompt
+- ALL tool calls in ONE array per response — never split into multiple arrays
+- For a read-then-write task: batch the reads first, get results, then batch the writes
+- Never use execute_bash to write file contents — use write_file
+- Never modify vendor/, node_modules/, or .git/
+- Always read a file before patching it (patch_file requires exact search_block match)
+${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}
+
+${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
+  ? "⚡ NEW PROJECT: Write ALL files immediately. Do NOT list_dir or read_file first — nothing exists yet."
+  : ""}`;
+            } else {
+              content += `
 
 Project root: ${rootDir}
 
@@ -154,13 +190,18 @@ ${dirTree ? `\nDIRECTORY LISTING:\n${dirTree}` : ""}
 ${content.includes("NEW_PROJECT MODE") || content.includes("NEW PROJECT MODE")
   ? "⚡ NEW PROJECT: Write ALL files immediately. Do NOT list_dir or read_file first — nothing exists yet."
   : ""}`;
+            }
           }
         }
       }
 
+      // For scoping mode (e.g. nuclear retry), omit the [ROLE] prefix and --- separator.
+      // DeepSeek echoes messages that start with [USER] or [SYSTEM] markers — using raw
+      // content prevents the echo and lets DeepSeek treat the message as a task to complete.
+      if (isScoping) return content;
       return `[${String(m.role || "user").toUpperCase()}]\n${content}`;
     })
-    .join("\n\n---\n\n");
+    .join(isScoping ? "\n\n" : "\n\n---\n\n");
 
   if (fullPrompt.length > 80000 && providerName === "deepseek") {
     return compactPromptForDeepSeek(fullPrompt);

@@ -2,6 +2,7 @@ import { applyUpdatesScript } from "#copilot/run/main/applyFilesPhase/index.js";
 import { appendDiffOrStatus, appendGitStatus } from "./formatters.js";
 import { execAsync } from "#utils/exec.js";
 import path from "node:path";
+import fs from "node:fs";
 import { colors } from "#app/ui/colors.js";
 import { log } from "#app/ui/log.js";
 
@@ -223,6 +224,34 @@ export async function handleWriteFile(input, { rootDir, state, allowedDirs = [] 
       `Writing an empty file is a pipeline failure — the verifier will reject it immediately.\n` +
       `Re-read the file if needed, then write the complete implementation now.`
     );
+  }
+  // Truncation guard: if the file already exists and the new content has dramatically
+  // fewer lines, reject it — the AI likely generated a partial/truncated version.
+  try {
+    const resolvedPath = path.isAbsolute(input.path)
+      ? input.path
+      : path.join(rootDir, input.path);
+    if (fs.existsSync(resolvedPath)) {
+      const existingContent = fs.readFileSync(resolvedPath, "utf8");
+      const existingLines = existingContent.split("\n").length;
+      const newLines = input.content.split("\n").length;
+      // Flag if new file is less than 60% of original lines AND lost more than 50 lines.
+      // This threshold catches truncation while allowing legitimate rewrites of small files.
+      if (existingLines >= 80 && newLines < existingLines * 0.6) {
+        return (
+          `[ERROR writing ${input.path}]\n` +
+          `TRUNCATION DETECTED: The existing file has ${existingLines} lines but your content only has ${newLines} lines (${Math.round(newLines/existingLines*100)}% of original).\n` +
+          `This indicates your write_file content is truncated — you generated only part of the file.\n\n` +
+          `REQUIRED: Use patch_file instead to make targeted changes. patch_file sends only the changed section and avoids truncation.\n` +
+          `• Read the file with read_file to see the current content\n` +
+          `• Use patch_file with a search_block that uniquely identifies the section to change\n` +
+          `• Only use write_file for files under 80 lines\n\n` +
+          `DO NOT attempt write_file again on this file unless you include ALL ${existingLines}+ lines.`
+        );
+      }
+    }
+  } catch (_) {
+    // Ignore errors in the guard — don't block legitimate writes
   }
   if (isJunkRootFile(input.path, rootDir, allowedDirs)) {
     return (

@@ -35,27 +35,7 @@ The intent document will be used by:
 - Reviewers to verify the solution against objective criteria
 
 IMPORTANT — for "new project" tasks (build a game, app, tool from scratch):
-Expand the user's brief description into comprehensive, production-quality requirements. If the user says "build a chess game", infer ALL expected features a quality chess game needs:
-- Complete rules for all piece types and special moves (castling, en passant, pawn promotion)
-- Game state management (check, checkmate, stalemate detection)
-- Clean visual UI with PROPER piece rendering: for chess, pieces MUST use Unicode symbols (♔♕♖♗♘♙♚♛♜♝♞♟) or SVG images — never bare letter codes (K/Q/R/B/N/P) which are unacceptable
-- Highlighted selected squares, legal move indicators (dots or colored overlays on valid destination squares)
-- AI opponent that responds automatically after the player moves (event-driven, NOT polling)
-- TypeScript types, responsive design, npm run build exits 0
-
-CRITICAL — AI OPPONENT ACCEPTANCE CRITERIA (add these as verifiable success_criteria):
-- "After white makes any legal move, the black AI automatically responds within 1 second without any user interaction"
-- "AI opponent uses useRef (not useState) for the 'AI is thinking' semaphore to avoid React useEffect timer cancellation"
-- "No infinite re-render loops: the game state stabilizes after each move"
-- "App.tsx calls useChessAI({ board, currentTurn, gameOver, enPassantTarget, castlingRights, onMove: executeMove }) with REAL state from useChessGame — NOT hardcoded null/empty values. Hardcoding enPassantTarget: null or castlingRights: {} prevents castling and en passant from working."
-- "getBestMove is called with the AI's color ('black') and picks moves that MINIMIZE the evaluation score from white's perspective — not maximize. The AI starts bestValue = +Infinity and updates when moveValue < bestValue."
-
-CRITICAL — HOOK ARCHITECTURE (add these as key_constraints):
-- "The useChessGame hook must manage selectedSquare and legalMoves INTERNALLY — it returns them as state values. App.tsx must NOT manage its own selectedSquare state or pass legalMoves={[]}."
-- "useChessGame returns: { board, currentTurn, selectedSquare, legalMoves, handleSquareClick, isCheck, isCheckmate, isStalemate, gameOver, moveHistory, capturedPieces, resetGame, promotionPending, handlePromotion, enPassantTarget, castlingRights, executeMove }"
-- "handleSquareClick(position) in the hook handles BOTH selection and move execution. It computes legal moves for the selected piece and stores them in the hook's state."
-- "executeMove(from, to, promotion?) is the function useChessAI calls to make a move — it must be in useChessGame's return value and passed as onMove to useChessAI"
-- "No file should exceed 200 lines. Split complex logic into separate utility files (moveValidation.ts, legalMoves.ts) that the hook imports."
+Expand the user's brief description into comprehensive, production-quality requirements. If the user says "build a deck-building card game", infer ALL expected features: full card definitions, combat mechanics, turn flow, UI layout, win/lose conditions, animations or transitions. If the user says "build a todo app", infer: persistence (localStorage), edit/delete, completed state, filtering, responsive layout.
 
 VISUAL QUALITY RULE for all interactive/game projects: game entities (pieces, cards, tiles, etc.) must be rendered using recognizable visual elements (Unicode symbols, SVG images, proper icons), not bare letter/number codes.
 
@@ -138,6 +118,13 @@ export async function intentNode(state, config) {
 
   if (!raw?.trim()) {
     log(colors.dim("  [Graph] -> Intent: empty response — continuing without intent document"));
+    return {};
+  }
+
+  // Detect provider service errors — treat as empty response rather than
+  // propagating the error text into downstream prompts as the intent document.
+  if (/we are experiencing an issue/i.test(raw) || /please try submitting a new message/i.test(raw)) {
+    log(colors.yellow("  [Graph] -> Intent: provider returned a service error — continuing without intent document"));
     return {};
   }
 

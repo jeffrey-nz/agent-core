@@ -366,6 +366,14 @@ export const AgentState = Annotation.Root({
     default: () => 0,
   }),
 
+  // True when the coder node wrote a file directly via nuclear extraction for a
+  // limited-output provider (DeepSeek). Tells patchReviewerNode to skip review —
+  // the coder cannot implement patch feedback for this provider type.
+  nuclearExtracted: Annotation({
+    reducer: (x, y) => y ?? x,
+    default: () => false,
+  }),
+
   // Set to true when the pipeline is blocked because a required target file
   // could not be found during research. Causes the workflow to route directly
   // to broadcastReviews (session end) instead of continuing to the verifier.

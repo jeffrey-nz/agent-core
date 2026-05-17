@@ -250,6 +250,7 @@ const nextSubtaskNode = async (state) => {
     // Reset patchReviewer retry counter so the new subtask gets a fresh budget.
     patchReviewFeedback: "",
     patchReviewRetryCount: 0,
+    nuclearExtracted: false,
     // Clear refiner output — it was scoped to the original research pass and
     // should not bleed into per-subtask coder/verifier context on retries.
     refinedResearch: "",
