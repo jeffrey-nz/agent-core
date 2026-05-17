@@ -1886,6 +1886,22 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
                 modifiedFiles.push(htmlAbsTarget);
                 proseCodeExtracted = true;
                 log(colors.green(`  [Graph] -> HTML seed written to ${path.basename(htmlAbsTarget)} — all required DOM IDs present`));
+
+                // Patch game.js if it has unbalanced braces (truncated from a prior run).
+                // An unclosed JS file causes headless render errors that block the HTML verifier.
+                // Writing a minimal stub lets subtask 2 start fresh with a valid target.
+                const jsStubName = "game.js";
+                const jsStubPath = path.join(state.projectDir, jsStubName);
+                try {
+                  const existingJs = await readFile(jsStubPath, "utf-8");
+                  const opens = (existingJs.match(/\{/g) || []).length;
+                  const closes = (existingJs.match(/\}/g) || []).length;
+                  if (opens > closes) {
+                    const closingBraces = "}\n".repeat(opens - closes);
+                    await writeFile(jsStubPath, existingJs + "\n" + closingBraces);
+                    log(colors.green(`  [Graph] -> Patched game.js: added ${opens - closes} closing brace(s) to fix syntax`));
+                  }
+                } catch { /* no game.js or already valid */ }
               } catch (e2) {
                 log(colors.yellow(`  [Graph] -> HTML seed write failed: ${e2.message}`));
               }
