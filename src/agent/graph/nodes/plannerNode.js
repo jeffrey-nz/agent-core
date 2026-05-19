@@ -65,9 +65,6 @@ VERIFICATION SUBTASK RULE (CRITICAL):
 If the original task involves FIXING an error, exception, crash, or failing command, the LAST subtask MUST be a standalone verification subtask. That verification subtask MUST explicitly reference the "Definition of done" from the Scope Document (if available) and map each verification step to a specific check. This subtask:
 - Must have "files": [] (no file writes - only command execution)
 - Must name the exact command(s) to run
-- Must be marked with constraints: "VERIFICATION ONLY - run the command and report the real, unabridged output. PASS only if the command exits without errors."ification subtask MUST explicitly reference the "Definition of done" from the Scope Document (if available) and map each verification step to a specific check. This subtask:
-- Must have "files": [] (no file writes - only command execution)
-- Must name the exact command(s) to run
 - Must be marked with constraints: "VERIFICATION ONLY - run the command and report the real, unabridged output. PASS only if the command exits without errors."
 - The Research Report's 'Verification command:' finding should be used if present.
 
