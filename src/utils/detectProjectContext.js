@@ -50,6 +50,22 @@ export function isUnityProject(rootDir) {
 }
 
 /**
+ * Returns true if rootDir appears to be a Python project.
+ * Detection: requirements.txt, setup.py, pyproject.toml, Pipfile, or setup.cfg
+ * OR at least one *.py file directly in the root directory.
+ */
+export function isPythonProject(rootDir) {
+  try {
+    const sentinels = ["requirements.txt", "setup.py", "pyproject.toml", "Pipfile", "setup.cfg"];
+    const entries = fs.readdirSync(rootDir);
+    if (sentinels.some((s) => entries.includes(s))) return true;
+    return entries.some((e) => e.endsWith(".py"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Returns true if rootDir appears to be a SilverStripe project.
  * Detection: composer.json + vendor/silverstripe/framework OR a _config/ directory.
  */
@@ -99,6 +115,7 @@ export function detectProjectContext(rootDir) {
 
   const isPhp = fs.existsSync(path.join(rootDir, "composer.json"));
   const isNode = fs.existsSync(path.join(rootDir, "package.json"));
+  const isPython = !isNode && !isPhp && isPythonProject(rootDir);
   const isSilverStripe = !unity && isSilverStripeProject(rootDir);
 
   let projectType = "unknown";
@@ -109,9 +126,10 @@ export function detectProjectContext(rootDir) {
   else if (isSilverStripe) projectType = "silverstripe";
   else if (isPhp) projectType = "php";
   else if (isNode) projectType = "node";
+  else if (isPython) projectType = "python";
 
-  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot });
+  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython });
   const researchDirective = buildResearchDirective(projectType);
 
-  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, projectType, constraints, researchDirective };
+  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython, projectType, constraints, researchDirective };
 }

@@ -22,7 +22,7 @@
  * Returns the project-type constraint block for all AI nodes.
  * Accepts the flags object produced by detectProjectContext().
  */
-export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot }) {
+export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython }) {
   if (unity)          return UNITY_CONSTRAINTS;
   if (isSwift)        return SWIFT_CONSTRAINTS;
   if (isGodot)        return GODOT_CONSTRAINTS;
@@ -30,6 +30,7 @@ export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSi
   if (isCSharp)       return CSHARP_CONSTRAINTS;
   if (isPhp)          return PHP_CONSTRAINTS;
   if (isNode)         return NODE_CONSTRAINTS;
+  if (isPython)       return PYTHON_CONSTRAINTS;
   return UNKNOWN_CONSTRAINTS;
 }
 
@@ -181,6 +182,46 @@ PROJECT SETUP (MANDATORY for all new Node.js / React / Vite projects — enforce
 - NO FAKE DEPS: NEVER add non-package entries to package.json dependencies or devDependencies. Keys starting with "#" (e.g. "#test-run", "#acceptance-test", "#marker") are NOT valid npm syntax and will be detected and rejected by the verifier. Track task completion in code or comments — never in package.json.
 - NO DEV SERVER IN EXECUTE_BASH: NEVER run "npm run dev", "vite", "next dev", or any other long-running dev server command via execute_bash. These commands block forever and will time out. The verifier automatically starts and stops the dev server — you do NOT need to do this.`;
 
+const PYTHON_CONSTRAINTS = `[PROJECT TYPE: Python]
+- Dependency management: pip / poetry / pipenv (check for requirements.txt, pyproject.toml, or Pipfile)
+- Tests: pytest (preferred) or unittest
+- Type checking: mypy or pyright (if configured)
+- Linting: ruff, flake8, or pylint (if configured — check pyproject.toml or setup.cfg)
+
+ENVIRONMENT SETUP (check before running anything):
+- Prefer running inside the existing virtualenv if one is present: check for .venv/, venv/, or env/ directories
+- Activate with: source .venv/bin/activate (Linux/macOS) or .venv\\Scripts\\activate (Windows)
+- If no virtualenv exists: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+- NEVER install packages globally with sudo pip — always use the project virtualenv
+
+PACKAGE MANAGEMENT:
+- requirements.txt: pip install -r requirements.txt  (install), pip freeze > requirements.txt (update)
+- pyproject.toml + poetry: poetry install, poetry add <package>, poetry run pytest
+- Pipfile: pipenv install, pipenv run pytest
+- NEVER manually edit requirements.txt without running pip freeze to regenerate it
+
+FRAMEWORK-SPECIFIC RULES:
+- Flask / FastAPI: NEVER run the dev server (flask run, uvicorn) from execute_bash — it blocks forever. Verify routes by reading the source. Only start the server if a subprocess/background mode is explicitly available.
+- Django: After model changes run: python manage.py makemigrations && python manage.py migrate
+  NEVER run python manage.py runserver — it blocks. Verify with pytest or django.test.Client instead.
+  Static files are collected with: python manage.py collectstatic --noinput
+- SQLAlchemy: After schema changes run Alembic migrations if present: alembic upgrade head
+
+TESTING:
+- Run tests from the project root: pytest (picks up pytest.ini / pyproject.toml [tool.pytest.ini_options])
+- For coverage: pytest --cov=. --cov-report=term-missing
+- Do NOT run python -m unittest directly unless pytest is absent
+- Test files follow naming: test_*.py or *_test.py; test functions start with test_
+
+PYTHON SYNTAX RULES:
+- f-strings require Python 3.6+; walrus operator (:=) requires Python 3.8+; match/case requires Python 3.10+
+- Check the Python version: python3 --version or look for python_requires in pyproject.toml / setup.cfg
+- Type annotations are encouraged but do not break runtime if missing (unless using from __future__ import annotations with a strict checker)
+- Use pathlib.Path over os.path for new code; use with open(...) context managers for all file I/O
+
+__pycache__ CLEANUP:
+- After test runs: execute_bash("find . -name '__pycache__' -exec rm -rf {} + 2>/dev/null; echo done") only if the working directory is cluttered`;
+
 const UNKNOWN_CONSTRAINTS = `[PROJECT TYPE: Unknown — explore the project structure before making assumptions about tooling or conventions]`;
 
 const SWIFT_CONSTRAINTS = `[PROJECT TYPE: Swift / Xcode]
@@ -207,6 +248,7 @@ export function buildResearchDirective(projectType) {
   if (projectType === "silverstripe") return SILVERSTRIPE_RESEARCH_DIRECTIVE;
   if (projectType === "swift")        return SWIFT_RESEARCH_DIRECTIVE;
   if (projectType === "godot")        return GODOT_RESEARCH_DIRECTIVE;
+  if (projectType === "python")       return PYTHON_RESEARCH_DIRECTIVE;
   return "";
 }
 
@@ -442,6 +484,35 @@ SWIFT PROJECT DETECTED. During your research you MUST specifically investigate:
 
 DO NOT attempt to run xcodebuild or swift build — the pipeline cannot sign or resolve the full Xcode build graph.`;
 
+const PYTHON_RESEARCH_DIRECTIVE = `
+
+PYTHON PROJECT DETECTED. During your research you MUST specifically investigate:
+1. Identify the dependency manager and Python version:
+   - execute_bash("python3 --version 2>&1 || python --version 2>&1")
+   - Check for requirements.txt, pyproject.toml, Pipfile, or setup.cfg
+   - If pyproject.toml: execute_bash("grep -E 'python_requires|requires-python' pyproject.toml 2>/dev/null")
+2. Identify the framework / entry point:
+   - Flask: look for app.py, wsgi.py, or \`from flask import Flask\` in any .py file
+   - FastAPI: look for main.py or \`from fastapi import FastAPI\`
+   - Django: look for manage.py — if found, execute_bash("python manage.py --version 2>&1")
+   - Django apps: list app directories in INSTALLED_APPS (read settings.py)
+   - CLI tool: look for __main__.py or entry_points in pyproject.toml
+   - Data/ML: look for notebooks (*.ipynb), pandas/numpy imports, or a Jupyter configuration
+3. Identify the test runner and existing test coverage:
+   - execute_bash("find . -name 'test_*.py' -o -name '*_test.py' | grep -v .venv | head -20")
+   - Check for pytest.ini, setup.cfg [tool:pytest], or pyproject.toml [tool.pytest.ini_options]
+   - execute_bash("pytest --collect-only -q 2>&1 | tail -5") to count existing tests (if pytest installed)
+4. Check virtualenv status:
+   - execute_bash("ls .venv/bin/python 2>/dev/null || ls venv/bin/python 2>/dev/null || echo NO_VENV")
+   - If no virtualenv: note it — the coder will need to create one before running tests
+5. For Django tasks — check existing models, views, and URL patterns relevant to the task:
+   - execute_bash("find . -name 'models.py' | grep -v .venv | head -10")
+   - execute_bash("find . -name 'urls.py' | grep -v .venv | head -10")
+6. ALREADY-IMPLEMENTED CHECK: Before reporting that a feature needs to be added, check if it is already present:
+   - grep for the key function/class name across all .py files
+   - If found: include in KEY FINDINGS SUMMARY: "⚠️ ALREADY PRESENT: [feature] in [file]. Only add what is genuinely missing."
+7. Note any linting or type-checking config (pyproject.toml [tool.mypy], .flake8, ruff.toml) — include in KEY FINDINGS so the coder knows which checker to satisfy.`;
+
 const GODOT_RESEARCH_DIRECTIVE = `
 
 GODOT PROJECT DETECTED. During your research you MUST specifically investigate:
@@ -471,9 +542,10 @@ ALREADY-IMPLEMENTED CHECK (prevents duplicate work):
  * Used by plannerNode and projectManagerNode.
  */
 export function buildTddDirective(projectType) {
-  if (projectType === "unity") return UNITY_TDD_DIRECTIVE;
-  if (projectType === "swift") return SWIFT_TDD_DIRECTIVE;
-  if (projectType === "godot") return GODOT_TDD_DIRECTIVE;
+  if (projectType === "unity")  return UNITY_TDD_DIRECTIVE;
+  if (projectType === "swift")  return SWIFT_TDD_DIRECTIVE;
+  if (projectType === "godot")  return GODOT_TDD_DIRECTIVE;
+  if (projectType === "python") return PYTHON_TDD_DIRECTIVE;
   if (projectType === "node" || projectType === "unknown") return NODE_TDD_DIRECTIVE;
   return GENERIC_TDD_DIRECTIVE;
 }
@@ -498,6 +570,22 @@ const SWIFT_TDD_DIRECTIVE = `IMPORTANT: This is a Swift project. Do NOT mandate 
 
 const GODOT_TDD_DIRECTIVE = `This is a Godot 4 / GDScript project. Tests run headlessly via execute_bash. After implementing each new feature (cards, enemies, relics, events, mechanics), add corresponding _assert() test cases to tests/TestRunner.gd. Use the existing _assert(label, condition) helper pattern already in that file. Do NOT create new test scene files — add test functions to the existing TestRunner.gd and call them from _ready(). The test subtask should run: GODOT_BIN --headless --path WIN_PATH tests/Test.tscn 2>&1 and confirm exit 0 with the new tests passing.`;
 
+const PYTHON_TDD_DIRECTIVE = `This is a Python project. Apply TDD where natural — writing a failing test first is encouraged BUT only if the module it imports already exists. If both the source module AND the test file are new, create the source module first.
+
+PYTEST RULES:
+- Test files: test_*.py or *_test.py in a tests/ directory (or the project root)
+- Test functions: def test_<name>() — no class required unless grouping related tests
+- Run tests: pytest -v (from the project root with the virtualenv active)
+- Each subtask that adds functionality should add at least one passing pytest test
+
+ANTI-STUB RULE: When a subtask requires implementing logic, produce a REAL implementation — NOT a function that returns None, [], or raises NotImplementedError. A test that passes against a stub is a false pass.
+
+DJANGO-SPECIFIC: For Django apps, prefer django.test.TestCase (subclass of unittest.TestCase) for tests that touch the database. Use pytest-django if it is already in the requirements. Do NOT run the dev server for verification — use Client() or pytest fixtures.
+
+COVERAGE TARGET: If pytest-cov is installed, the plan should include a final "run tests with coverage" subtask: pytest --cov=. --cov-report=term-missing`;
+
+
+
 // ---------------------------------------------------------------------------
 // Coder directive — injected into the coder system prompt
 // ---------------------------------------------------------------------------
@@ -521,7 +609,8 @@ export function buildCoderDirective(projectType) {
     projectType === "silverstripe" ? SILVERSTRIPE_CODER_DIRECTIVE :
     projectType === "unity"        ? UNITY_CODER_DIRECTIVE :
     projectType === "swift"        ? SWIFT_CODER_DIRECTIVE :
-    projectType === "godot"        ? GODOT_CODER_DIRECTIVE : "";
+    projectType === "godot"        ? GODOT_CODER_DIRECTIVE :
+    projectType === "python"       ? PYTHON_CODER_DIRECTIVE : "";
   return GENERAL_CODER_DIRECTIVE + frameworkDirective;
 }
 
@@ -727,6 +816,41 @@ const SWIFT_CODER_DIRECTIVE = `
   The verifier detects @Observable/@ObservableObject mismatch statically and REJECTS acceptance until all consuming files are updated.
 - SWIFT FILES: Place new .swift files in the correct directory for the project structure (Sources/<Target>/ for SPM; the named app folder for Xcode projects). Always read_file a nearby existing .swift file first to confirm the naming and import conventions in use.
 - STORYBOARD / XIB: .storyboard and .xib files are XML. If you must edit one, read_file it first, make targeted changes, and write_file the result. Do NOT attempt to compile or simulate them.`;
+
+const PYTHON_CODER_DIRECTIVE = `
+- VIRTUALENV FIRST: Before running any python/pytest/pip command, activate the project virtualenv:
+    execute_bash("source .venv/bin/activate 2>/dev/null || source venv/bin/activate 2>/dev/null || echo NO_VENV")
+  If NO_VENV, create one first: execute_bash("python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt -q")
+  Then prefix all python/pytest commands with the virtualenv path: .venv/bin/pytest, .venv/bin/python, etc.
+
+- NEVER RUN THE DEV SERVER: Do NOT run flask run, uvicorn, gunicorn, python manage.py runserver, or any other long-running server process via execute_bash — these block forever and will time out.
+  Verify web app logic by: (a) reading the route/view code and confirming correctness, (b) running pytest, or (c) using Django's Client() / Flask's app.test_client() inside a pytest test.
+
+- DJANGO MIGRATIONS: After creating or modifying any Django model (models.py), ALWAYS run:
+    execute_bash(".venv/bin/python manage.py makemigrations 2>&1 && .venv/bin/python manage.py migrate 2>&1")
+  Report the migration output as evidence. A model change without a migration will cause runtime errors.
+
+- IMPORTS AND MODULES: Python imports are case-sensitive and path-dependent. When adding a new module:
+  1. Use the project's existing import style (absolute vs relative — check nearby files).
+  2. Never use bare relative imports like "import utils" unless __init__.py or sys.path is configured for it.
+  3. For packages: ensure __init__.py exists in every directory that should be a package.
+  4. After writing a new module, verify it is importable: execute_bash(".venv/bin/python -c \\"import your.module; print('OK')\\"")
+
+- REQUIREMENTS HYGIENE:
+  - After adding a new pip package: execute_bash(".venv/bin/pip freeze > requirements.txt")
+  - Do NOT manually edit requirements.txt — always regenerate with pip freeze.
+  - If pyproject.toml + poetry is in use: "poetry add <package>" — never edit pyproject.toml by hand for dependencies.
+
+- POST-WRITE SYNTAX CHECK: After writing any .py file:
+    execute_bash(".venv/bin/python -m py_compile path/to/file.py 2>&1 && echo OK")
+  Exit 0 + "OK" = no syntax errors. Any output = syntax error — fix before proceeding.
+
+- TESTS (MANDATORY): After implementing any feature, run the test suite:
+    execute_bash(".venv/bin/pytest -v 2>&1 | tail -30")
+  All tests must pass. If a test fails: read the error output, fix the issue, re-run. Never report a subtask complete while tests are failing.
+
+- __PYCACHE__ NOISE: Ignore __pycache__ directories and .pyc files — they are auto-generated and not part of the deliverable. Do NOT write or modify them.`;
+
 
 // ---------------------------------------------------------------------------
 // Acceptance test directive — injected into the coder system prompt

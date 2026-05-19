@@ -336,6 +336,50 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
     );
   }
 
+  // ── Python hazards ───────────────────────────────────────────────────────
+  if (projectType === "python") {
+    // Always-on: never start the dev server
+    if (/flask|uvicorn|gunicorn|django.*runserver|manage\.py.*run/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ PYTHON HAZARD — NEVER RUN THE DEV SERVER VIA execute_bash\n` +
+        `flask run, uvicorn, gunicorn, and python manage.py runserver ALL block forever — the tool call will time out.\n` +
+        `Instead, verify route/view logic by:\n` +
+        `  (a) Reading the source code and confirming correctness\n` +
+        `  (b) Running pytest (which can test Flask/Django views without a live server)\n` +
+        `  (c) Using Django's Client() or Flask's app.test_client() inside a test function`,
+      );
+    }
+
+    // Django model changes without migrations
+    if (/models\.py|DataObject|Django|migration|makemigration/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ DJANGO HAZARD — MODEL CHANGES REQUIRE MIGRATIONS\n` +
+        `After ANY change to models.py (new field, renamed field, new model, deleted model), you MUST run:\n` +
+        `  execute_bash(".venv/bin/python manage.py makemigrations 2>&1 && .venv/bin/python manage.py migrate 2>&1")\n` +
+        `A model change without a migration causes runtime errors when the code first queries the DB.\n` +
+        `Include the migration output in your report as evidence.`,
+      );
+    }
+
+    // Mutable default argument — #1 Python gotcha
+    if (/def\s+\w+\s*\(|function.*arg|default.*argument/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ PYTHON HAZARD — MUTABLE DEFAULT ARGUMENT TRAP\n` +
+        `Default argument values in Python are evaluated ONCE at function definition time, not per call.\n\n` +
+        `WRONG (the list/dict is SHARED across ALL calls — mutations persist):\n` +
+        `  def append_item(val, lst=[]):   # ← lst is created once and reused!\n` +
+        `    lst.append(val); return lst\n` +
+        `  append_item(1)  # → [1]\n` +
+        `  append_item(2)  # → [1, 2]  ← bug: previous call's data is still there\n\n` +
+        `CORRECT (use None as the sentinel, create a fresh object inside the function):\n` +
+        `  def append_item(val, lst=None):\n` +
+        `    if lst is None: lst = []\n` +
+        `    lst.append(val); return lst\n\n` +
+        `Same rule applies to dict, set, and any other mutable default.`,
+      );
+    }
+  }
+
   // General hazard: test/REVIEW subtasks must NOT write files
   if (/^(REVIEW|LOCATE|FIND|IDENTIFY|INVESTIGATE|ACCEPTANCE TEST):/i.test(currentTask.trim())) {
     hazards.push(
