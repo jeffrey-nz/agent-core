@@ -1279,11 +1279,14 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
     // Tick the spinner every 10 s so the UI shows elapsed turn time.
     // The Vercel AI SDK path streams natively; the automation-api path is silent.
     const _coderTurnStart = Date.now();
+    let _coderElapsedSteps = 0;
     const _coderTicker = setInterval(() => {
+      _coderElapsedSteps++;
       const elapsed = Math.round((Date.now() - _coderTurnStart) / 1000);
       const label = `Coder Agent - waiting for AI response (${elapsed}s)...`;
       dashboardState.aiStatus = label;
       eventBus.emit("spinner_update", { status: label });
+      eventBus.emit("research_progress", { step: _coderElapsedSteps, elapsed });
     }, 10000);
 
     // For DeepSeek (limited-output provider), the browser session accumulates
