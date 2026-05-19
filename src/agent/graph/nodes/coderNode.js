@@ -568,7 +568,13 @@ export async function coderNode(state, config) {
   if (/⛔\s*BLOCKED/i.test(currentSubtask?.task || "")) {
     const blockedMsg = currentSubtask?.implementationNote || currentSubtask?.task || "Target file not found.";
     log(colors.red(`  [Graph] -> Coder: BLOCKED subtask detected — halting session`));
+    // Emit both events: session_error for pipeline listeners and system_message so
+    // the UI shows an error (not the misleading "task complete" done banner).
     eventBus.emit("session_error", { message: blockedMsg });
+    eventBus.emit("system_message", {
+      text: `⛔ Session blocked: ${blockedMsg.slice(0, 200)}`,
+      type: "error",
+    });
     return {
       modifiedFiles: [],
       lastCoderResponse: blockedMsg,
