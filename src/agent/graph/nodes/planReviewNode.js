@@ -38,11 +38,23 @@ export async function planReviewNode(state) {
 
   const modifiedSummary = (state.modifiedFiles || []).slice(-8).join(", ") || "none";
 
+  // Build a short goal line from intent document or raw task for reviewer context.
+  const goalLine = (() => {
+    if (state.intentDocument) {
+      const m = state.intentDocument.match(/^GOAL:\s*(.+)/m);
+      if (m) return m[1].trim();
+    }
+    const userTask = state.messages?.find((m) => m.role === "user")?.content || "";
+    return userTask.slice(0, 120);
+  })();
+
   let text = "";
   try {
     const result = await generateText({
       model: state.model,
       prompt: `You are a software plan reviewer. A subtask just completed successfully.
+
+Overall goal: ${goalLine || "(unknown)"}
 
 Completed subtask:
 ${completedTask}
@@ -53,6 +65,7 @@ Remaining subtasks:
 ${remaining.map((s, i) => `${i + 1}. ${s.task}`).join("\n")}
 
 Are the remaining subtasks still accurate and in the right order given what was just done?
+IMPORTANT: Do not remove subtasks that are still needed to achieve the overall goal.
 
 If YES (plan is still valid): respond with exactly: PLAN_OK
 If NO (plan needs updating): respond with PLAN_REVISED on the first line, then list the corrected remaining subtasks as numbered items (same format, same count or fewer). Be minimal — only change what actually needs changing.`,
@@ -82,9 +95,9 @@ If NO (plan needs updating): respond with PLAN_REVISED on the first line, then l
     return {};
   }
 
-  const revisedTasks = lines.map((l) => ({
-    // Preserve any structured fields from the original where possible
-    ...(remaining[0] ? {} : {}),
+  const revisedTasks = lines.map((l, i) => ({
+    // Preserve files, implementationNote, etc. from the matching original subtask
+    ...(remaining[i] || {}),
     task: l.replace(/^\s*\d+\.\s*/, "").trim(),
   }));
 

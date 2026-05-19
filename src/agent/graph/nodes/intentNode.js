@@ -55,7 +55,7 @@ Output a JSON object with exactly these fields:
     "Technical constraint the solution must respect (framework conventions, APIs, patterns already in use)",
     ...
   ],
-  "verification_approach": "How success can be confirmed without human interaction — e.g. 'execute_bash npm run build exits 0 and npm run dev starts the dev server'",
+  "verification_approach": "How success can be confirmed without human interaction. Examples: JS/TS → 'npm run build exits 0'; Python → 'python3 -m pytest passes'; Ruby → 'bundle exec rspec passes'; Go → 'go test ./... passes and go build ./... exits 0'. NEVER suggest starting a server (flask run, rails server, go run) — use the test suite instead.",
   "risk_areas": [
     "Area of high uncertainty or common failure point that deserves extra research attention",
     ...

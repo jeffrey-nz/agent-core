@@ -48,5 +48,30 @@ export function categorizeFiles(modifiedFilesAbs) {
     // Swift/Xcode UI layout asset files — XML, no compilation needed
     storyboardFiles: modifiedFiles.filter((f) => f.endsWith(".storyboard")),
     xibFiles: modifiedFiles.filter((f) => f.endsWith(".xib")),
+
+    // Ruby test files — match _spec.rb / _test.rb or files under spec/ or test/ dirs
+    rubyTestFiles: modifiedFiles.filter(
+      (f) => f.endsWith(".rb") && (/(?:_spec|_test)\.rb$/.test(f) || /\/(?:spec|test)\//.test(f)),
+    ),
+
+    // Go test files — *_test.go
+    goTestFiles: modifiedFiles.filter((f) => f.endsWith("_test.go")),
+
+    // All Go source files (for go vet)
+    goFiles: modifiedFiles.filter((f) => f.endsWith(".go")),
+
+    // Python test files — test_*.py / *_test.py or files under tests/ / test/
+    pythonTestFiles: modifiedFiles.filter(
+      (f) => f.endsWith(".py") && (/(?:^|[\\/])test_[^/]+\.py$/.test(f) || /[^/]+_test\.py$/.test(f) || /[\\/](?:tests?|test_suite)[\\/]/.test(f)),
+    ),
+
+    // All Python source files (for syntax checking)
+    pyFiles: modifiedFiles.filter((f) => f.endsWith(".py")),
+
+    // All Ruby source files (for syntax checking)
+    rubyFiles: modifiedFiles.filter((f) => f.endsWith(".rb") && !f.includes("/vendor/") && !f.includes("/gems/")),
+
+    // CSS/SCSS/Sass files (for brace-balance check)
+    cssFiles: modifiedFiles.filter((f) => /\.(css|scss|sass)$/i.test(f)),
   };
 }

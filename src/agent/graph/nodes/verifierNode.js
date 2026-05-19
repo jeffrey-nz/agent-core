@@ -111,10 +111,10 @@ function isSwiftAssetOnlyChange(modifiedFiles = []) {
   );
 }
 
-// Expanded to cover dotnet and Unity batchmode alongside existing PHP/JS tooling.
+// Expanded to cover dotnet, Unity batchmode, Ruby (bundle/rspec), and Go alongside existing PHP/JS tooling.
 // Framework-specific build command patterns (dev/build, db:build, sake) come from projectDirectives.
 const REQUIRES_COMMAND_RE = new RegExp(
-  `(?:run|execute|regenerate|rerun|re-run|perform|invoke|boot|confirm|trigger)\\s+(?:\\S+\\s+)*?(?:composer|phpunit|npm|yarn|pnpm|artisan|rake|docker|ddev|dotnet|unity|${BUILD_COMMAND_RE.source})\\b|composer\\s+(?:install|update|require|remove|dump-autoload)\\b|${BUILD_COMMAND_RE.source}\\b|dotnet\\s+(?:build|test|run|restore)\\b`,
+  `(?:run|execute|regenerate|rerun|re-run|perform|invoke|boot|confirm|trigger)\\s+(?:\\S+\\s+)*?(?:composer|phpunit|npm|yarn|pnpm|artisan|rake|bundle|rspec|minitest|pytest|docker|ddev|dotnet|unity|${BUILD_COMMAND_RE.source})\\b|composer\\s+(?:install|update|require|remove|dump-autoload)\\b|bundle\\s+exec\\b|${BUILD_COMMAND_RE.source}\\b|dotnet\\s+(?:build|test|run|restore)\\b|go\\s+(?:test|build|vet|mod)\\b|python3?\\s+-m\\s+pytest\\b`,
   "i"
 );
 
@@ -253,10 +253,22 @@ async function generateReflexionLesson(state) {
   if (!state.model || !state.lastCoderResponse) return null;
   try {
     const subtask = state.subtasks?.[state.currentSubtaskIndex]?.task || "unknown";
+    const projectType = state.projectType ? `\nProject type: ${state.projectType}` : "";
+    // Include verifier rejection and execution errors alongside coder output
+    // for a more accurate lesson — these contain the actual failure signal.
+    const execErrorSummary = (state.lastExecutionErrors || [])
+      .slice(0, 3)
+      .map((e) => `${e.tool}: ${e.summary}`)
+      .join("\n");
+    const failureDetails = [
+      state.verifierFeedback ? `Verifier: ${state.verifierFeedback.slice(0, 400)}` : "",
+      execErrorSummary ? `Execution errors:\n${execErrorSummary}` : "",
+      `Coder output: ${state.lastCoderResponse.slice(0, 600)}`,
+    ].filter(Boolean).join("\n\n");
     const { text } = await generateText({
       model: state.model,
-      prompt: `A software coder failed a subtask. Write one lesson (≤ 25 words) that generalises the failure as a principle for future attempts.\n\nFormat: Lesson: <principle>\n\nSubtask: ${subtask}\nCoder output summary: ${state.lastCoderResponse.slice(0, 600)}\n\nLesson:`,
-      maxTokens: 60,
+      prompt: `A software coder failed a subtask. Extract ONE concrete, actionable lesson (≤ 30 words) that names the specific mistake and the correct approach.\n\nFormat: Lesson: <specific principle>\n\nSubtask: ${subtask}${projectType}\nFailure details: ${failureDetails}\n\nLesson:`,
+      maxTokens: 70,
     });
     const match = text.match(/lesson:\s*(.+)/i);
     return match?.[1]?.trim() || null;
@@ -265,88 +277,160 @@ async function generateReflexionLesson(state) {
   }
 }
 
-// Checks that a new Node.js/React project has the mandatory setup files in place.
-// Fired whenever package.json is among the files written in a subtask.
+// Checks that a new project has the mandatory setup files in place.
+// Covers Node.js/React, Python, Ruby, and Go projects.
 // Returns an array of error strings (empty = all good).
 async function checkProjectSetup(projectDir, modifiedFiles = []) {
   const errors = [];
 
-  // .gitignore must exist and contain node_modules
-  const gitignorePath = path.join(projectDir, ".gitignore");
+  const [hasPackageJson, hasGemfile, hasGoMod] = await Promise.all([
+    fs.promises.access(path.join(projectDir, "package.json")).then(() => true).catch(() => false),
+    fs.promises.access(path.join(projectDir, "Gemfile")).then(() => true).catch(() => false),
+    fs.promises.access(path.join(projectDir, "go.mod")).then(() => true).catch(() => false),
+  ]);
+  const pyManifestChecks = await Promise.all(
+    ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile", "setup.cfg"].map(
+      (m) => fs.promises.access(path.join(projectDir, m)).then(() => true).catch(() => false),
+    ),
+  );
+  const hasPythonProject = pyManifestChecks.some(Boolean);
+
+  // Read .gitignore once and share across all checks
+  let gitignoreContent = null;
+  let gitignoreMissing = false;
   try {
-    const content = await fs.promises.readFile(gitignorePath, "utf8");
-    if (!content.includes("node_modules")) {
+    gitignoreContent = await fs.promises.readFile(path.join(projectDir, ".gitignore"), "utf8");
+  } catch {
+    gitignoreMissing = true;
+  }
+
+  // ── Node.js checks ──────────────────────────────────────────────────────────
+  if (hasPackageJson) {
+    if (gitignoreMissing) {
+      errors.push(
+        ".gitignore is MISSING. A new Node.js/React project MUST have a .gitignore " +
+          "that includes at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. " +
+          "Create it NOW before proceeding.",
+      );
+    } else if (!gitignoreContent.includes("node_modules")) {
       errors.push(
         ".gitignore exists but does NOT contain 'node_modules'. " +
           "Tracking node_modules in git is unacceptable (4,000+ files). " +
           "Add node_modules/ to .gitignore NOW.",
       );
     }
-  } catch {
-    errors.push(
-      ".gitignore is MISSING. A new Node.js/React project MUST have a .gitignore " +
-        "that includes at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. " +
-        "Create it NOW before proceeding.",
-    );
+
+    // package.json must not have fake deps (keys starting with "#")
+    // Also check TypeScript projects have a tsconfig.
+    try {
+      const pkg = JSON.parse(
+        await fs.promises.readFile(path.join(projectDir, "package.json"), "utf8"),
+      );
+      const allKeys = [
+        ...Object.keys(pkg.dependencies || {}),
+        ...Object.keys(pkg.devDependencies || {}),
+      ];
+      const fakes = allKeys.filter((k) => k.startsWith("#"));
+      if (fakes.length > 0) {
+        errors.push(
+          `package.json contains FAKE dependency entries: ${fakes.join(", ")}. ` +
+            "These are NOT valid npm packages. Remove them immediately. " +
+            "Never use package.json to track task completion or pipeline state.",
+        );
+      }
+
+      // TypeScript project must have a tsconfig so tsc can type-check it.
+      // Without a tsconfig, all type errors are silently skipped in every subtask.
+      const hasTypeScript = !!(pkg.devDependencies?.typescript || pkg.dependencies?.typescript);
+      if (hasTypeScript) {
+        const hasTsconfigApp = await fs.promises.access(path.join(projectDir, "tsconfig.app.json")).then(() => true).catch(() => false);
+        const hasTsconfigRoot = await fs.promises.access(path.join(projectDir, "tsconfig.json")).then(() => true).catch(() => false);
+        if (!hasTsconfigApp && !hasTsconfigRoot) {
+          errors.push(
+            "TypeScript project is MISSING tsconfig.json (or tsconfig.app.json). " +
+              "Without it, the TypeScript compiler cannot type-check ANY file, so type errors accumulate silently. " +
+              "Create tsconfig.json NOW with at minimum: target, lib, module, jsx, strict, noEmit, moduleResolution, include. " +
+              "Vite projects typically also need: allowImportingTsExtensions, isolatedModules.",
+          );
+        }
+      }
+
+      // React projects must include eslint-plugin-react-hooks to catch useEffect dependency bugs.
+      // Only enforce this when package.json is being WRITTEN by the current coder turn
+      // (i.e., it was modified this subtask). For pre-existing scaffolds we skip this check
+      // so the gate doesn't block all subtasks indefinitely.
+      const hasReact = !!(pkg.dependencies?.react || pkg.devDependencies?.react);
+      const pkgJsonWasWrittenThisSubtask = modifiedFiles.some(f => /\/package\.json$|^package\.json$/.test(f));
+      if (hasReact && pkgJsonWasWrittenThisSubtask) {
+        const hasReactHooksPlugin = !!(
+          pkg.devDependencies?.["eslint-plugin-react-hooks"] ||
+          pkg.dependencies?.["eslint-plugin-react-hooks"]
+        );
+        if (!hasReactHooksPlugin) {
+          errors.push(
+            "React project is MISSING eslint-plugin-react-hooks in devDependencies. " +
+              "This plugin catches useEffect/useCallback dependency bugs that cause broken AI opponents, " +
+              "stale closures, and infinite re-render loops at lint time rather than runtime. " +
+              "Add to devDependencies: \"eslint-plugin-react-hooks\": \"^5.0.0\" and configure it in eslint.config.js.",
+          );
+        }
+      }
+    } catch {
+      /* JSON parse errors are caught by the syntax validator */
+    }
   }
 
-  // package.json must not have fake deps (keys starting with "#")
-  // Also check TypeScript projects have a tsconfig.
-  try {
-    const pkg = JSON.parse(
-      await fs.promises.readFile(path.join(projectDir, "package.json"), "utf8"),
-    );
-    const allKeys = [
-      ...Object.keys(pkg.dependencies || {}),
-      ...Object.keys(pkg.devDependencies || {}),
-    ];
-    const fakes = allKeys.filter((k) => k.startsWith("#"));
-    if (fakes.length > 0) {
+  // ── Python checks ────────────────────────────────────────────────────────────
+  if (hasPythonProject) {
+    if (gitignoreMissing) {
       errors.push(
-        `package.json contains FAKE dependency entries: ${fakes.join(", ")}. ` +
-          "These are NOT valid npm packages. Remove them immediately. " +
-          "Never use package.json to track task completion or pipeline state.",
+        ".gitignore is MISSING. A Python project MUST have a .gitignore that includes at minimum: " +
+          ".venv/, __pycache__/, *.pyc, *.pyo, dist/, build/, *.egg-info/. Create it NOW.",
       );
-    }
-
-    // TypeScript project must have a tsconfig so tsc can type-check it.
-    // Without a tsconfig, all type errors are silently skipped in every subtask.
-    const hasTypeScript = !!(pkg.devDependencies?.typescript || pkg.dependencies?.typescript);
-    if (hasTypeScript) {
-      const hasTsconfigApp = await fs.promises.access(path.join(projectDir, "tsconfig.app.json")).then(() => true).catch(() => false);
-      const hasTsconfigRoot = await fs.promises.access(path.join(projectDir, "tsconfig.json")).then(() => true).catch(() => false);
-      if (!hasTsconfigApp && !hasTsconfigRoot) {
+    } else {
+      const pyMissing = [];
+      if (!gitignoreContent.includes(".venv")) pyMissing.push(".venv/");
+      if (!gitignoreContent.includes("__pycache__")) pyMissing.push("__pycache__/");
+      if (pyMissing.length > 0) {
         errors.push(
-          "TypeScript project is MISSING tsconfig.json (or tsconfig.app.json). " +
-            "Without it, the TypeScript compiler cannot type-check ANY file, so type errors accumulate silently. " +
-            "Create tsconfig.json NOW with at minimum: target, lib, module, jsx, strict, noEmit, moduleResolution, include. " +
-            "Vite projects typically also need: allowImportingTsExtensions, isolatedModules.",
+          `.gitignore is missing Python-specific entries: ${pyMissing.join(", ")}. ` +
+            "These directories are generated locally and must never be committed to git. " +
+            "Add them to .gitignore NOW.",
         );
       }
     }
+  }
 
-    // React projects must include eslint-plugin-react-hooks to catch useEffect dependency bugs.
-    // Only enforce this when package.json is being WRITTEN by the current coder turn
-    // (i.e., it was modified this subtask). For pre-existing scaffolds we skip this check
-    // so the gate doesn't block all subtasks indefinitely.
-    const hasReact = !!(pkg.dependencies?.react || pkg.devDependencies?.react);
-    const pkgJsonWasWrittenThisSubtask = modifiedFiles.some(f => /\/package\.json$|^package\.json$/.test(f));
-    if (hasReact && pkgJsonWasWrittenThisSubtask) {
-      const hasReactHooksPlugin = !!(
-        pkg.devDependencies?.["eslint-plugin-react-hooks"] ||
-        pkg.dependencies?.["eslint-plugin-react-hooks"]
+  // ── Ruby checks ─────────────────────────────────────────────────────────────
+  if (hasGemfile) {
+    if (gitignoreMissing) {
+      errors.push(
+        ".gitignore is MISSING. A Ruby project MUST have a .gitignore that includes at minimum: " +
+          "vendor/bundle, .bundle/, .env, *.log, tmp/, log/. Create it NOW.",
       );
-      if (!hasReactHooksPlugin) {
-        errors.push(
-          "React project is MISSING eslint-plugin-react-hooks in devDependencies. " +
-            "This plugin catches useEffect/useCallback dependency bugs that cause broken AI opponents, " +
-            "stale closures, and infinite re-render loops at lint time rather than runtime. " +
-            "Add to devDependencies: \"eslint-plugin-react-hooks\": \"^5.0.0\" and configure it in eslint.config.js.",
-        );
-      }
+    } else if (!gitignoreContent.includes("vendor/bundle") && !gitignoreContent.includes("vendor")) {
+      errors.push(
+        ".gitignore is missing Ruby-specific entry: vendor/bundle. " +
+          "Bundled gems installed to vendor/bundle must never be committed to git. " +
+          "Add vendor/bundle to .gitignore NOW.",
+      );
     }
-  } catch {
-    /* JSON parse errors are caught by the syntax validator */
+  }
+
+  // ── Go checks ────────────────────────────────────────────────────────────────
+  if (hasGoMod) {
+    if (gitignoreMissing) {
+      errors.push(
+        ".gitignore is MISSING. A Go project MUST have a .gitignore that includes at minimum: " +
+          "the compiled binary name, *.test (go test binaries), *.out (coverage files). Create it NOW.",
+      );
+    } else if (!gitignoreContent.includes("*.test")) {
+      errors.push(
+        ".gitignore is missing Go test binary pattern: *.test. " +
+          "Running `go test ./...` compiles a test binary per package — these must not be committed. " +
+          "Add *.test to .gitignore NOW.",
+      );
+    }
   }
 
   return errors;
@@ -1533,6 +1617,277 @@ ${currentTask}${capWarning}`,
       }
       // ── end Godot acceptance test ──
 
+      // ── Ruby / RSpec acceptance test ─────────────────────────────────────────
+      // Run bundle exec rspec directly rather than trusting model self-report.
+      // Falls through to the general path if bundle is not available or spec/ is missing.
+      if ((state.projectType === "ruby" || state.projectType === "unknown") && projectDir) {
+        const specDir = path.join(projectDir, "spec");
+        const hasSpec = await fs.promises.access(specDir).then(() => true).catch(() => false);
+        const gemfilePath = path.join(projectDir, "Gemfile");
+        const hasGemfile = await fs.promises.access(gemfilePath).then(() => true).catch(() => false);
+
+        if (hasSpec && hasGemfile) {
+          log(colors.dim("  [Verifier] Running Ruby RSpec acceptance tests directly..."));
+          const rspecResult = await execAsync("bundle exec rspec spec/ 2>&1", {
+            cwd: projectDir,
+            timeout: 120000,
+          }).catch((e) => e);
+          const rspecOut = ((rspecResult?.stdout || "") + (rspecResult?.stderr || "")).trim();
+
+          // Detect command-not-found — bundle not installed in this env; fall through
+          if (/command not found|No such file/i.test(rspecOut)) {
+            log(colors.dim("  [Verifier] bundle/rspec not available — falling through to model self-report"));
+          } else {
+            // "0 examples" = no test ran — treat as failure, same as pytest "0 items"
+            const noExamples = /\b0 examples?\b/i.test(rspecOut);
+            const passed = !noExamples && /[1-9]\d* examples?, 0 failures?/i.test(rspecOut);
+            const failed = noExamples || (/\d+ (failure|error)s?/i.test(rspecOut) && !passed);
+
+            if (passed) {
+              log(colors.green("  [Verifier] Ruby RSpec acceptance tests PASSED (verifier-confirmed)."));
+              eventBus.emit("system_message", { text: `✓ RSpec acceptance tests passed (verifier-confirmed)`, type: "info" });
+              emitTaskCompleted(state);
+              const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+              await commitVerifiedSubtask(state.projectDir, taskLabel);
+              await closeSubIssueForSubtask(state);
+              writeVerificationMarker();
+              return { verifierFeedback: "PASS" };
+            }
+
+            // Tests failed or 0 examples — return the real output so the coder can fix it
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            const atCap = newRetryCount >= effectiveMaxRetries;
+            const capWarning = atCap
+              ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): fix all RSpec failures and write required files.`
+              : "";
+
+            log(colors.red(`  [Verifier] Ruby RSpec acceptance tests FAILED. Retry ${newRetryCount}.`));
+            const failSnippet = rspecOut.slice(-2000);
+
+            const noExamplesMsg = noExamples
+              ? `RSpec collected 0 examples — the test suite ran NOTHING.\n\n` +
+                `Common causes:\n` +
+                `  - Spec file has only a \`describe\`/\`context\` shell with no \`it\` blocks inside\n` +
+                `  - Spec methods not wrapped in \`it 'description' do ... end\`\n\n` +
+                `FIX: Add \`it 'description' do ... expect(...).to ... end\` blocks inside each describe block.\n\n`
+              : "The verifier ran bundle exec rspec spec/ directly and tests FAILED. Fix the implementation before this subtask can pass.\n\n";
+
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — RSPEC TESTS FAILED]
+
+${noExamplesMsg}RSpec output (last 2000 chars):
+\`\`\`
+${failSnippet}
+\`\`\`
+
+To fix:
+1. Read the failing test file(s) to understand what is expected
+2. Fix the implementation to make all examples pass (0 failures)
+3. Do NOT report "ACCEPTANCE TEST PASSED" unless the verifier confirms 0 failures
+
+CURRENT SUBTASK:
+${currentTask}${capWarning}`,
+              }],
+            };
+          }
+        }
+      }
+      // ── end Ruby acceptance test ──
+
+      // ── Go acceptance test ────────────────────────────────────────────────────
+      // Run go test ./... directly rather than trusting model self-report.
+      // Falls through to the general path if go is not available or go.mod is missing.
+      if ((state.projectType === "go" || state.projectType === "unknown") && projectDir) {
+        const goModPath = path.join(projectDir, "go.mod");
+        const hasGoMod = await fs.promises.access(goModPath).then(() => true).catch(() => false);
+
+        if (hasGoMod) {
+          log(colors.dim("  [Verifier] Running Go acceptance tests directly..."));
+          // Use -v to get per-test lines — needed to detect "no tests to run" warning
+          const goTestResult = await execAsync("go test -v ./... 2>&1", {
+            cwd: projectDir,
+            timeout: 120000,
+          }).catch((e) => e);
+          const goTestOut = ((goTestResult?.stdout || "") + (goTestResult?.stderr || "")).trim();
+
+          // Detect command-not-found — go not installed in this env; fall through
+          if (/command not found|No such file/i.test(goTestOut)) {
+            log(colors.dim("  [Verifier] go not available — falling through to model self-report"));
+          } else {
+            // Pass: only "ok" lines (no "FAIL" lines), or "no test files" across all packages
+            const hasFailLine = /^FAIL\b/m.test(goTestOut);
+            const hasBuildFail = /build failed|cannot|undefined:/i.test(goTestOut);
+            const hasOkLine = /^ok\b/m.test(goTestOut);
+            const allNoTestFiles = /\[no test files\]/m.test(goTestOut) && !hasOkLine && !hasFailLine;
+            // "no tests to run" = _test.go exists but has no func Test* functions
+            const goNoTests = /warning: no tests to run/i.test(goTestOut);
+            const passed = (hasOkLine || allNoTestFiles) && !hasFailLine && !hasBuildFail && !goNoTests;
+
+            if (passed) {
+              log(colors.green("  [Verifier] Go acceptance tests PASSED (verifier-confirmed)."));
+              eventBus.emit("system_message", { text: `✓ Go tests passed (verifier-confirmed)`, type: "info" });
+              emitTaskCompleted(state);
+              const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+              await commitVerifiedSubtask(state.projectDir, taskLabel);
+              await closeSubIssueForSubtask(state);
+              writeVerificationMarker();
+              return { verifierFeedback: "PASS" };
+            }
+
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            const atCap = newRetryCount >= effectiveMaxRetries;
+            const capWarning = atCap
+              ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): fix all Go test failures and write required files.`
+              : "";
+
+            log(colors.red(`  [Verifier] Go acceptance tests FAILED. Retry ${newRetryCount}.`));
+            const failSnippetGo = goTestOut.slice(-2000);
+
+            const goNoTestsMsg = goNoTests
+              ? `go test ran 0 tests — "warning: no tests to run" was emitted.\n\n` +
+                `This means the _test.go file(s) exist but contain no \`func Test*(t *testing.T)\` functions.\n\n` +
+                `Common causes:\n` +
+                `  - Test functions not prefixed with "Test" (uppercase T)\n` +
+                `  - Test functions have wrong signature (must be \`func TestFoo(t *testing.T)\`)\n` +
+                `  - Only helper/setup functions in the test file, no actual test cases\n\n` +
+                `FIX: Add at least one \`func TestFoo(t *testing.T) { ... }\` function to each _test.go file.\n\n`
+              : "The verifier ran go test -v ./... directly and tests FAILED. Fix the implementation before this subtask can pass.\n\n";
+
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — GO TESTS FAILED]
+
+${goNoTestsMsg}go test -v output (last 2000 chars):
+\`\`\`
+${failSnippetGo}
+\`\`\`
+
+To fix:
+1. Read the failing test file(s) to understand what is expected
+2. Fix the implementation to make all tests pass (no FAIL lines)
+3. Run go build ./... to verify the build is also clean
+
+go test output (last 2000 chars):
+\`\`\`
+${failSnippetGo}
+\`\`\`
+
+To fix:
+1. Read the failing test file(s) to understand what is expected
+2. Fix the implementation to make all tests pass (no FAIL lines)
+3. Run go build ./... to verify the build is also clean
+4. Do NOT report "ACCEPTANCE TEST PASSED" unless the verifier confirms 0 failures
+
+CURRENT SUBTASK:
+${currentTask}${capWarning}`,
+              }],
+            };
+          }
+        }
+      }
+      // ── end Go acceptance test ──
+
+      // ── Python / pytest acceptance test ──────────────────────────────────────
+      // Run pytest directly rather than trusting model self-report.
+      // Falls through to the general path if pytest is not available or no tests/ found.
+      if ((state.projectType === "python" || state.projectType === "unknown") && projectDir) {
+        const requirementsPath = path.join(projectDir, "requirements.txt");
+        const pyprojectPath = path.join(projectDir, "pyproject.toml");
+        const setupPyPath = path.join(projectDir, "setup.py");
+        const pipfilePath = path.join(projectDir, "Pipfile");
+        const setupCfgPath = path.join(projectDir, "setup.cfg");
+        const hasPythonProject =
+          await fs.promises.access(requirementsPath).then(() => true).catch(() => false) ||
+          await fs.promises.access(pyprojectPath).then(() => true).catch(() => false) ||
+          await fs.promises.access(setupPyPath).then(() => true).catch(() => false) ||
+          await fs.promises.access(pipfilePath).then(() => true).catch(() => false) ||
+          await fs.promises.access(setupCfgPath).then(() => true).catch(() => false);
+
+        if (hasPythonProject) {
+          log(colors.dim("  [Verifier] Running Python pytest acceptance tests directly..."));
+          // Prefer the project's venv over the system Python to ensure deps are available
+          const venvPython = path.join(projectDir, ".venv", "bin", "python");
+          const hasVenv = await fs.promises.access(venvPython).then(() => true).catch(() => false);
+          const pytestCmd = hasVenv
+            ? `"${venvPython}" -m pytest --tb=short -q 2>&1`
+            : "python3 -m pytest --tb=short -q 2>&1";
+          const pytestResult = await execAsync(pytestCmd, {
+            cwd: projectDir,
+            timeout: 120000,
+          }).catch((e) => e);
+          const pytestOut = ((pytestResult?.stdout || "") + (pytestResult?.stderr || "")).trim();
+
+          if (/command not found|No such file|No module named pytest/i.test(pytestOut)) {
+            log(colors.dim("  [Verifier] pytest not available — falling through to model self-report"));
+          } else {
+            const passed =
+              /\d+ passed/.test(pytestOut) && !/\d+ failed/.test(pytestOut) && !/\d+ error/.test(pytestOut);
+            // "0 items collected" = no tests ran — treat as failure, not a pass
+            const noTests = /no tests ran|collected 0 items/i.test(pytestOut);
+
+            if (passed) {
+              log(colors.green("  [Verifier] Python pytest acceptance tests PASSED (verifier-confirmed)."));
+              eventBus.emit("system_message", { text: `✓ pytest acceptance tests passed (verifier-confirmed)`, type: "info" });
+              emitTaskCompleted(state);
+              const taskLabel = state.subtasks?.[state.currentSubtaskIndex]?.task || "acceptance test subtask";
+              await commitVerifiedSubtask(state.projectDir, taskLabel);
+              await closeSubIssueForSubtask(state);
+              writeVerificationMarker();
+              return { verifierFeedback: "PASS" };
+            }
+
+            // Tests failed or 0 items collected — return real output so the coder can fix it
+            const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+            const atCap = newRetryCount >= effectiveMaxRetries;
+            const capWarning = atCap
+              ? `\n\n⚠️ FINAL ATTEMPT (${newRetryCount}/${effectiveMaxRetries}): fix all pytest failures.`
+              : "";
+
+            log(colors.red(`  [Verifier] Python pytest acceptance tests FAILED. Retry ${newRetryCount}.`));
+            const failSnippet = pytestOut.slice(-2000);
+
+            const noTestsMsg = noTests
+              ? `pytest collected 0 test items — the test suite ran NOTHING.\n\n` +
+                `Common causes:\n` +
+                `  - Test functions not named with "test_" prefix (e.g. "def check_foo" instead of "def test_foo")\n` +
+                `  - Test class methods not starting with "test_"\n` +
+                `  - Test file imports failing silently\n\n` +
+                `FIX: Ensure all test functions match \`def test_<name>\`. Run: .venv/bin/python -m pytest -v 2>&1\n\n`
+              : "The verifier ran pytest directly and tests FAILED. Fix the implementation before this subtask can pass.\n\n";
+
+            return {
+              verifierFeedback: "FAIL",
+              coderRetryCount: newRetryCount,
+              messages: [{
+                role: "user",
+                content: `[VERIFIER AUTOMATED FEEDBACK — PYTEST TESTS FAILED]
+
+${noTestsMsg}pytest output (last 2000 chars):
+\`\`\`
+${failSnippet}
+\`\`\`
+
+To fix:
+1. Read the failing test file(s) to understand what is expected
+2. Fix the implementation to make all tests pass (0 failures)
+3. Do NOT report "ACCEPTANCE TEST PASSED" unless the verifier confirms 0 failures
+
+CURRENT SUBTASK:
+${currentTask}${capWarning}`,
+              }],
+            };
+          }
+        }
+      }
+      // ── end Python acceptance test ──
+
       const response = state.lastCoderResponse || "";
       // Pull subtask metadata once at the top so all gates below can use it.
       // (Used to be declared deep inside the structural-detection block.)
@@ -1595,7 +1950,7 @@ ${currentTask}${capWarning}`,
       // `npm test`, `node test`, or "print 'X'" patterns indicate a shell-runnable
       // test, verified by execute_bash output rather than HTTP fetches.
       const isCliAcceptance =
-        /\b(node\s+\S+\.(?:m?js)|npm\s+(?:test|run\s+\S+)|node\s+--test|pnpm\s+test|yarn\s+test|pytest|cargo\s+test|go\s+test)\b/i.test(allCriteriaText) ||
+        /\b(node\s+\S+\.(?:m?js)|npm\s+(?:test|run\s+\S+)|node\s+--test|pnpm\s+test|yarn\s+test|pytest|cargo\s+test|go\s+test|bundle\s+exec\s+rspec|bundle\s+exec\s+rake|rspec\b|minitest)\b/i.test(allCriteriaText) ||
         /must\s+print\s+["'`]/i.test(allCriteriaText);
       const isStructuralAcceptance =
         (/\b(grep|read_file|execute_bash|find_file|db[:\-]build|sake|run_sake|batchmode|editmode[_\s]results|unity.*test)\b/i.test(allCriteriaText) ||
@@ -1809,24 +2164,73 @@ ${currentTask}${capWarning}`,
       if (hasAuthRedirectWarning || isExternalUrl) {
         failureDetail = `\n⛔ WRONG URL: Your http_request called ${testedUrl || "an external URL"} — this is the LIVE PRODUCTION SITE, not the local development server.\nThe production site has authentication (Azure AD / SSO) and returns a login page on HTTP 200, which does NOT reflect your local code changes.\nYou MUST use the LOCAL DEV URL from your system prompt for all http_request calls. Check the [LOCAL DEV URL] section at the top of your context.\nExample: http_request(url="http://thescopes.local/?flush=1")`;
       } else if (isStructuralAcceptance) {
+        const pt = state.projectType || "";
         if (!calledStructuralTool) {
-          failureDetail =
-            `\nThis is a STRUCTURAL acceptance test — it verifies code patterns and DB state, NOT a live web page.\n` +
-            `Do NOT use http_request for this test (the CMS admin requires authentication; unauthenticated requests return a login redirect).\n\n` +
-            `You MUST run the structural checks using execute_bash or read_file:\n` +
-            `  1. grep -rn "removeByName" app/src/ — confirm the problematic pattern is gone\n` +
-            `  2. read_file the relevant YAML/PHP file(s) to quote the correct content\n` +
-            `  3. run_sake (db:build) if schema verification is needed\n` +
-            `  4. Report: "ACCEPTANCE TEST PASSED — [criterion 1]: [tool output], [criterion 2]: [tool output]"\n\n` +
-            `Do NOT return an empty array []. Do NOT output NO_CHANGES_NEEDED. Call the tools and quote their output.`;
+          if (pt === "ruby") {
+            failureDetail =
+              `\nThis is a RUBY acceptance test — run the test suite with execute_bash, NOT http_request.\n\n` +
+              `Required steps:\n` +
+              `  1. execute_bash: bundle exec rspec spec/ 2>&1 — run the full RSpec test suite\n` +
+              `  2. execute_bash: bundle exec rake test 2>&1 — if Rake tasks exist for testing\n` +
+              `  3. Read the output: look for "N examples, 0 failures"\n` +
+              `  4. If all pass: report "ACCEPTANCE TEST PASSED — N examples, 0 failures"\n` +
+              `  5. If tests fail: fix the implementation, then re-run before reporting\n\n` +
+              `Do NOT return NO_CHANGES_NEEDED. Call execute_bash and show the real test output.`;
+          } else if (pt === "go") {
+            failureDetail =
+              `\nThis is a GO acceptance test — run the tests with execute_bash, NOT http_request.\n\n` +
+              `Required steps:\n` +
+              `  1. execute_bash: go test ./... 2>&1 — run all Go tests\n` +
+              `  2. execute_bash: go build ./... 2>&1 — verify the build is clean\n` +
+              `  3. Read the output: look for "ok" lines and no "FAIL" lines\n` +
+              `  4. If all pass: report "ACCEPTANCE TEST PASSED — go test ./... returned ok"\n` +
+              `  5. If tests fail: fix the implementation, then re-run before reporting\n\n` +
+              `Do NOT return NO_CHANGES_NEEDED. Call execute_bash and show the real test output.`;
+          } else if (pt === "python") {
+            failureDetail =
+              `\nThis is a PYTHON acceptance test — run the test suite with execute_bash, NOT http_request.\n\n` +
+              `Required steps:\n` +
+              `  1. execute_bash: python3 -m pytest --tb=short -q 2>&1 — run the full pytest suite\n` +
+              `  2. Read the output: look for "N passed" and no "failed" or "error"\n` +
+              `  3. If all pass: report "ACCEPTANCE TEST PASSED — N passed"\n` +
+              `  4. If tests fail: fix the implementation, then re-run pytest before reporting\n\n` +
+              `Do NOT return NO_CHANGES_NEEDED. Call execute_bash and show the real test output.`;
+          } else {
+            failureDetail =
+              `\nThis is a STRUCTURAL acceptance test — it verifies code patterns and DB state, NOT a live web page.\n` +
+              `Do NOT use http_request for this test (the CMS admin requires authentication; unauthenticated requests return a login redirect).\n\n` +
+              `You MUST run the structural checks using execute_bash or read_file:\n` +
+              `  1. grep -rn "removeByName" app/src/ — confirm the problematic pattern is gone\n` +
+              `  2. read_file the relevant YAML/PHP file(s) to quote the correct content\n` +
+              `  3. run_sake (db:build) if schema verification is needed\n` +
+              `  4. Report: "ACCEPTANCE TEST PASSED — [criterion 1]: [tool output], [criterion 2]: [tool output]"\n\n` +
+              `Do NOT return an empty array []. Do NOT output NO_CHANGES_NEEDED. Call the tools and quote their output.`;
+          }
         } else {
-          failureDetail =
-            `\nYou ran structural tool checks but did not report "ACCEPTANCE TEST PASSED".\n` +
-            `Quote the tool output that confirms EACH criterion from the acceptance criteria:\n` +
-            `  - For grep results: quote the "no matches found" output or the matching lines\n` +
-            `  - For read_file: quote the relevant file content that proves the state is correct\n` +
-            `  - For db:build: quote the exit code and "Build completed" line\n` +
-            `Then explicitly report: "ACCEPTANCE TEST PASSED — [criterion]: [evidence], [criterion]: [evidence]"`;
+          if (pt === "ruby") {
+            failureDetail =
+              `\nYou ran execute_bash but did not report "ACCEPTANCE TEST PASSED".\n` +
+              `If bundle exec rspec passed (0 failures): explicitly report "ACCEPTANCE TEST PASSED — N examples, 0 failures"\n` +
+              `If tests failed: read the failure output, fix the implementation, re-run rspec, then report the result.`;
+          } else if (pt === "go") {
+            failureDetail =
+              `\nYou ran execute_bash but did not report "ACCEPTANCE TEST PASSED".\n` +
+              `If go test ./... passed (all "ok" lines): explicitly report "ACCEPTANCE TEST PASSED — go test ./... returned ok"\n` +
+              `If tests failed: read the failure output, fix the implementation, re-run go test, then report the result.`;
+          } else if (pt === "python") {
+            failureDetail =
+              `\nYou ran execute_bash but did not report "ACCEPTANCE TEST PASSED".\n` +
+              `If python3 -m pytest passed (N passed, 0 failed): explicitly report "ACCEPTANCE TEST PASSED — N passed"\n` +
+              `If tests failed: read the failure output, fix the implementation, re-run pytest, then report the result.`;
+          } else {
+            failureDetail =
+              `\nYou ran structural tool checks but did not report "ACCEPTANCE TEST PASSED".\n` +
+              `Quote the tool output that confirms EACH criterion from the acceptance criteria:\n` +
+              `  - For grep results: quote the "no matches found" output or the matching lines\n` +
+              `  - For read_file: quote the relevant file content that proves the state is correct\n` +
+              `  - For db:build: quote the exit code and "Build completed" line\n` +
+              `Then explicitly report: "ACCEPTANCE TEST PASSED — [criterion]: [evidence], [criterion]: [evidence]"`;
+          }
         }
       } else if (hasFailed) {
         failureDetail = "\nYour response reported ACCEPTANCE TEST FAILED — diagnose the missing component and fix it, then re-curl.";
@@ -1838,8 +2242,15 @@ ${currentTask}${capWarning}`,
           "\nYou called http_request but did not report 'ACCEPTANCE TEST PASSED'. You must:\n1. Inspect the response HTML body for the SUCCESS evidence described in the subtask\n2. Quote the specific HTML snippet that proves the feature is live\n3. If the SUCCESS evidence is absent: diagnose what is missing and fix it, then re-curl\n4. Once evidence is confirmed: explicitly report 'ACCEPTANCE TEST PASSED — [feature]: [quoted snippet]'";
       }
 
+      const _pt = state.projectType || "";
       const mainInstruction = isStructuralAcceptance
-        ? `ACCEPTANCE TEST subtask requires structural verification — grep, read_file, and execute_bash evidence.\n\nDo NOT use http_request (CMS admin requires authentication). Run the structural checks from the acceptance criteria.`
+        ? (_pt === "ruby"
+            ? `ACCEPTANCE TEST subtask requires Ruby test suite execution — run bundle exec rspec, NOT http_request.\n\nExecute the test suite with execute_bash and report the pass/fail result.`
+            : _pt === "go"
+              ? `ACCEPTANCE TEST subtask requires Go test execution — run go test ./..., NOT http_request.\n\nExecute tests with execute_bash and report the pass/fail result.`
+              : _pt === "python"
+                ? `ACCEPTANCE TEST subtask requires Python test execution — run python3 -m pytest, NOT http_request.\n\nExecute the test suite with execute_bash and report the pass/fail result.`
+                : `ACCEPTANCE TEST subtask requires structural verification — grep, read_file, and execute_bash evidence.\n\nDo NOT use http_request (CMS admin requires authentication). Run the structural checks from the acceptance criteria.`)
         : `ACCEPTANCE TEST subtask requires live HTTP evidence — not file writes, not db:build output.\n\nYou must use http_request to fetch the page and find the SUCCESS evidence HTML in the response body.\nHTTP 200 alone is not acceptance. "db:build succeeded" is not acceptance.`;
 
       return {
@@ -1875,12 +2286,21 @@ ${currentTask}${capWarning}`,
         );
 
         const isComposer = /composer/i.test(currentTask);
-        const isPhpunit = /phpunit|test/i.test(currentTask);
+        const isPhpunit = /phpunit/i.test(currentTask);
+        const isRubyTest = state.projectType === "ruby" || /bundle\s+exec\s+rspec|bundle\s+exec\s+rake\s+test|rspec\b/i.test(currentTask);
+        const isGoTest = state.projectType === "go" || /\bgo\s+test\b/i.test(currentTask);
+        const isPythonTest = state.projectType === "python" || /\bpytest\b|python3?\s+-m\s+pytest/i.test(currentTask);
         const toolHint = isComposer
           ? "Required: call the 'run_composer' tool (e.g. run_composer install or run_composer update -W)"
           : isPhpunit
             ? "Required: call the 'run_phpunit' tool"
-            : "Required: call 'execute_bash', 'run_composer', or 'run_phpunit' with the appropriate command.";
+            : isRubyTest
+              ? "Required: call execute_bash with 'bundle exec rspec spec/' or 'bundle exec rake test' and show the real output"
+              : isGoTest
+                ? "Required: call execute_bash with 'go test ./...' and 'go build ./...' and show the real output"
+                : isPythonTest
+                  ? "Required: call execute_bash with 'python3 -m pytest --tb=short -q' and show the real output"
+                  : "Required: call 'execute_bash', 'run_composer', or 'run_phpunit' with the appropriate command.";
 
         const atCap = newRetryCount >= effectiveMaxRetries;
         const capWarning = atCap
@@ -2094,25 +2514,29 @@ DEBUGGING STRATEGY:
       }
     }
 
-    // Project setup gate: fires when package.json was written this subtask.
-    // Ensures .gitignore (with node_modules) exists and package.json has no
-    // fake "#key" entries. Catches the two most common new-project setup failures.
-    // Trigger when package.json exists in the project root — not just when it was
-    // written on this turn. The "modifiedFiles only includes this turn" semantics
-    // mean the gate would silently no-op on retry turns (when the coder doesn't
-    // re-write package.json), letting subtask 1 pass without .gitignore.
+    // Project setup gate: fires when a known project scaffold exists in the project root.
+    // Covers Node.js (.gitignore+node_modules, fake deps, tsconfig, react-hooks),
+    // Python (.gitignore+.venv/__pycache__), Ruby (.gitignore+vendor/bundle),
+    // and Go (.gitignore+*.test). Trigger on sentinel file existence rather than
+    // "was written this turn" so retry turns don't silently skip the check.
     const pkgJsonExistsForGate = state.projectDir
-      ? await fs.promises
-          .access(path.join(state.projectDir, "package.json"))
-          .then(() => true)
-          .catch(() => false)
+      ? await fs.promises.access(path.join(state.projectDir, "package.json")).then(() => true).catch(() => false)
       : false;
-    if (pkgJsonExistsForGate && state.projectDir) {
+    const nonNodeProjectExistsForGate = !pkgJsonExistsForGate && state.projectDir
+      ? (await Promise.all([
+          ...["requirements.txt", "pyproject.toml", "setup.py", "Pipfile", "setup.cfg"].map(
+            (m) => fs.promises.access(path.join(state.projectDir, m)).then(() => true).catch(() => false),
+          ),
+          fs.promises.access(path.join(state.projectDir, "Gemfile")).then(() => true).catch(() => false),
+          fs.promises.access(path.join(state.projectDir, "go.mod")).then(() => true).catch(() => false),
+        ])).some(Boolean)
+      : false;
+    if ((pkgJsonExistsForGate || nonNodeProjectExistsForGate) && state.projectDir) {
       const setupErrors = await checkProjectSetup(state.projectDir, state.modifiedFiles || []);
       if (setupErrors.length > 0) {
         const newRetry = (state.coderRetryCount ?? 0) + 1;
         log(colors.red(`  [Graph] -> Project setup gate FAILED. Retry ${newRetry}/${effectiveMaxRetries}.`));
-        eventBus.emit("system_message", { text: "✗ Project setup check failed — missing .gitignore or fake deps", type: "warning" });
+        eventBus.emit("system_message", { text: "✗ Project setup check failed — missing .gitignore or project scaffold issues", type: "warning" });
         return {
           verifierFeedback: "FAIL",
           coderRetryCount: newRetry,
@@ -2141,8 +2565,16 @@ DEBUGGING STRATEGY:
           .access(path.join(state.projectDir, "node_modules"))
           .then(() => true)
           .catch(() => false);
-        if (!nodeModulesExists) {
-          log(colors.dim("  [Setup] node_modules missing — running npm install..."));
+        const pkgJsonModifiedThisSubtask = (state.modifiedFiles || []).some(
+          (f) => /\/package\.json$|^package\.json$/.test(f),
+        );
+        // Install from scratch when node_modules is missing; re-sync when package.json
+        // was modified this subtask so newly added dependencies are immediately available.
+        if (!nodeModulesExists || pkgJsonModifiedThisSubtask) {
+          const reason = nodeModulesExists
+            ? "package.json modified — re-syncing dependencies"
+            : "node_modules missing";
+          log(colors.dim(`  [Setup] ${reason} — running npm install...`));
           try {
             await execAsync("npm install --prefer-offline", {
               cwd: state.projectDir,
@@ -2151,6 +2583,114 @@ DEBUGGING STRATEGY:
             log(colors.green("  [Setup] npm install completed"));
           } catch (err) {
             log(colors.yellow(`  [Setup] npm install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+          }
+        }
+      }
+    }
+
+    // Auto pip install: run whenever a Python project manifest exists in the root.
+    // Checks requirements.txt (pip), pyproject.toml (PEP 517 / poetry / flit), and
+    // setup.py. Mirrors the npm auto-install pattern — prevents "ModuleNotFoundError"
+    // on subsequent subtasks by keeping the venv in sync.
+    if (state.projectDir) {
+      const reqTxtPath    = path.join(state.projectDir, "requirements.txt");
+      const pyprojectPath = path.join(state.projectDir, "pyproject.toml");
+      const setupPyPath   = path.join(state.projectDir, "setup.py");
+      const pipfilePath2  = path.join(state.projectDir, "Pipfile");
+      const setupCfgPath2 = path.join(state.projectDir, "setup.cfg");
+      const [reqTxtExists, pyprojectExists, setupPyExists, pipfileExists, setupCfgExists] = await Promise.all([
+        fs.promises.access(reqTxtPath).then(() => true).catch(() => false),
+        fs.promises.access(pyprojectPath).then(() => true).catch(() => false),
+        fs.promises.access(setupPyPath).then(() => true).catch(() => false),
+        fs.promises.access(pipfilePath2).then(() => true).catch(() => false),
+        fs.promises.access(setupCfgPath2).then(() => true).catch(() => false),
+      ]);
+      const hasPythonManifest = reqTxtExists || pyprojectExists || setupPyExists || pipfileExists || setupCfgExists;
+      if (hasPythonManifest) {
+        const venvPip = path.join(state.projectDir, ".venv", "bin", "pip");
+        const venvExists = await fs.promises.access(venvPip).then(() => true).catch(() => false);
+        const manifestModifiedThisSubtask = (state.modifiedFiles || []).some(
+          (f) => /\/requirements[\w.-]*\.txt$|^requirements[\w.-]*\.txt$|\/pyproject\.toml$|^pyproject\.toml$|\/setup\.py$|^setup\.py$|\/Pipfile$|^Pipfile$|\/setup\.cfg$|^setup\.cfg$/.test(f),
+        );
+        if (!venvExists || manifestModifiedThisSubtask) {
+          const reason = !venvExists
+            ? ".venv missing — creating venv and installing Python dependencies"
+            : "Python manifest modified — re-syncing Python dependencies";
+          log(colors.dim(`  [Setup] ${reason}...`));
+          try {
+            if (!venvExists) {
+              await execAsync("python3 -m venv .venv", { cwd: state.projectDir, timeout: 60000 });
+            }
+            if (reqTxtExists) {
+              await execAsync(".venv/bin/pip install -r requirements.txt --quiet", {
+                cwd: state.projectDir,
+                timeout: 300000,
+              });
+            } else {
+              // pyproject.toml or setup.py — install the project in editable mode so its
+              // packages are importable without a requirements.txt
+              await execAsync(".venv/bin/pip install -e . --quiet", {
+                cwd: state.projectDir,
+                timeout: 300000,
+              });
+            }
+            log(colors.green("  [Setup] pip install completed"));
+          } catch (err) {
+            log(colors.yellow(`  [Setup] pip install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+          }
+        }
+      }
+    }
+
+    // Auto bundle install: run whenever Gemfile exists and either vendor/bundle is absent
+    // or Gemfile was modified this subtask. Mirrors the npm/pip auto-install patterns.
+    if (state.projectDir) {
+      const gemfilePath = path.join(state.projectDir, "Gemfile");
+      const gemfileExists = await fs.promises.access(gemfilePath).then(() => true).catch(() => false);
+      if (gemfileExists) {
+        const vendorBundlePath = path.join(state.projectDir, "vendor", "bundle");
+        const vendorExists = await fs.promises.access(vendorBundlePath).then(() => true).catch(() => false);
+        const gemfileModified = (state.modifiedFiles || []).some(
+          (f) => /\/Gemfile$|^Gemfile$|\/Gemfile\.lock$|^Gemfile\.lock$/.test(f),
+        );
+        if (!vendorExists || gemfileModified) {
+          const reason = !vendorExists
+            ? "vendor/bundle missing — running bundle install"
+            : "Gemfile modified — re-syncing Ruby gems";
+          log(colors.dim(`  [Setup] ${reason}...`));
+          try {
+            await execAsync("bundle install 2>&1", {
+              cwd: state.projectDir,
+              timeout: 300000,
+            });
+            log(colors.green("  [Setup] bundle install completed"));
+          } catch (err) {
+            log(colors.yellow(`  [Setup] bundle install failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
+          }
+        }
+      }
+    }
+
+    // Auto go mod tidy: run whenever go.mod exists and any .go file was modified this
+    // subtask. Mirrors the npm/pip/bundle auto-install patterns — keeps go.sum in sync
+    // and prevents "no required module provides package" errors on subsequent subtasks.
+    if (state.projectDir) {
+      const goModPath = path.join(state.projectDir, "go.mod");
+      const goModExists = await fs.promises.access(goModPath).then(() => true).catch(() => false);
+      if (goModExists) {
+        const goFilesModified = (state.modifiedFiles || []).some(
+          (f) => /\.go$/.test(f),
+        );
+        if (goFilesModified) {
+          log(colors.dim("  [Setup] .go file modified — running go mod tidy..."));
+          try {
+            await execAsync("go mod tidy 2>&1", {
+              cwd: state.projectDir,
+              timeout: 120000,
+            });
+            log(colors.green("  [Setup] go mod tidy completed"));
+          } catch (err) {
+            log(colors.yellow(`  [Setup] go mod tidy failed (non-fatal): ${err.stderr?.slice(0, 200) || err.message?.slice(0, 120)}`));
           }
         }
       }

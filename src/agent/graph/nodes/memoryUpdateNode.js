@@ -187,18 +187,22 @@ export async function memoryUpdateNode(state) {
   await commitMemory(state.projectDir, issueNumber);
 
   // Persist reflexion lessons for cross-session learning (Shinn et al. 2023).
-  // Lessons accumulated during THIS session are appended to docs/memory/reflexion.md
-  // so contextRetrieverNode can inject them into future sessions.
-  const newLessons = (state.reflexionMemory || []).filter((m) => !m.positive);
-  if (newLessons.length > 0) {
+  // Both failure lessons AND first-pass successes are appended to docs/memory/reflexion.md
+  // so contextRetrieverNode can inject the full picture into future sessions.
+  const allNewLessons = state.reflexionMemory || [];
+  if (allNewLessons.length > 0) {
     try {
       const memDir = path.join(state.projectDir, "docs", "memory");
       await mkdir(memDir, { recursive: true });
       const memFile = path.join(memDir, "reflexion.md");
       const date = TODAY();
-      const entries = newLessons.map((m) => `- [${date}] ${m.lesson}`).join("\n");
+      const entries = allNewLessons
+        .map((m) => `- [${date}]${m.positive ? " ✓" : ""} ${m.lesson}`)
+        .join("\n");
       await appendFile(memFile, `\n${entries}\n`);
-      log(colors.dim(`  [Memory] Persisted ${newLessons.length} reflexion lesson(s) to reflexion.md`));
+      const failCount = allNewLessons.filter((m) => !m.positive).length;
+      const passCount = allNewLessons.filter((m) => m.positive).length;
+      log(colors.dim(`  [Memory] Persisted ${failCount} lesson(s) + ${passCount} success marker(s) to reflexion.md`));
     } catch (err) {
       log(colors.yellow(`  [Memory] Reflexion persist failed (non-fatal): ${err.message}`));
     }

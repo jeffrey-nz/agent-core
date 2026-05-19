@@ -427,6 +427,31 @@ ACCEPTANCE TEST AUTOMATION RULES (CRITICAL — violations cause infinite retry l
   * Godot paths passed to --path MUST use Windows format (C:/Users/...) not WSL format (/mnt/c/...).
   * CRITICAL: The subtask "task" field MUST be prefixed with "ACCEPTANCE TEST: " (e.g. "ACCEPTANCE TEST: Run Godot syntax check and unit tests"). The verifier uses this exact prefix to trigger headless Godot test execution — without it, only a GDScript syntax check runs and the full Test.tscn/Playthrough.tscn tests are skipped.
   * The coder's response text MUST also contain the phrase "ACCEPTANCE TEST PASSED" — the verifier uses this exact string to detect a passing acceptance test.
+- RUBY / RAILS ACCEPTANCE TESTS (CRITICAL — never start the Rails server):
+  * NEVER use http_request or start a Rails server (rails s, puma) in an acceptance test — the server blocks forever.
+  * The ONLY acceptable acceptance test methods for Ruby/Rails are:
+    1. RSpec: execute_bash("bundle exec rspec spec/ --format documentation 2>&1 | tail -40") — must exit 0, all examples pass
+    2. Minitest: execute_bash("bundle exec rake test 2>&1 | tail -30") — must exit 0, 0 failures
+    3. Rails routes: execute_bash("bundle exec rails routes 2>&1 | grep <route_name>") — confirm route is registered
+    4. Schema check: execute_bash("bundle exec rails db:migrate:status 2>&1 | grep up") — confirm migrations applied
+  * Set "files": [] (verification only — no writes)
+  * If the task adds a feature, the acceptance test MUST run the test suite and confirm new tests pass.
+- GO ACCEPTANCE TESTS (CRITICAL — never start a Go HTTP server):
+  * NEVER use http_request or run "go run" in an acceptance test — a server blocks forever.
+  * The ONLY acceptable acceptance test methods for Go are:
+    1. Tests: execute_bash("go test ./... 2>&1 | tail -30") — must exit 0, all tests pass
+    2. Build: execute_bash("go build ./... 2>&1") — must exit 0 with no errors
+    3. Vet: execute_bash("go vet ./... 2>&1") — must exit 0 with no warnings
+  * Set "files": [] (verification only — no writes)
+  * If the task adds a function or package, the acceptance test MUST run "go test ./..." and confirm the new tests pass.
+- PYTHON ACCEPTANCE TESTS (CRITICAL — never start a Python HTTP server):
+  * NEVER use http_request or start a server (flask run, uvicorn, gunicorn, python manage.py runserver) in an acceptance test — the server blocks forever.
+  * The ONLY acceptable acceptance test methods for Python are:
+    1. pytest: execute_bash("python3 -m pytest --tb=short -q 2>&1 | tail -40") — or ".venv/bin/python -m pytest" if a venv exists. Must exit 0, 0 failures.
+    2. Django checks: execute_bash(".venv/bin/python manage.py check 2>&1") — confirm no system check errors
+    3. Module import: execute_bash("python3 -c 'import mymodule; print(mymodule.__version__)' 2>&1") — confirm importable
+  * Set "files": [] (verification only — no writes)
+  * If the task adds a feature, the acceptance test MUST run pytest and confirm the new tests pass.
 
 COMPOSER PACKAGE NAME VALIDATION (CRITICAL — prevents adding non-existent packages):
 If the Research Report or Refined Research flags that a Composer package named in the original task description does NOT exist (composer show returned Package not found, or a naming mismatch was noted), you MUST:
@@ -454,6 +479,23 @@ When the Research Report indicates the workspace is empty or contains no package
   • index.html (the HTML entry point with <div id="root">)
   • src/main.jsx (the React entry point that renders <App /> into #root)
 Without a scaffold subtask, source files like App.jsx are written into a dead project that has no package.json, no dev server, and cannot run vitest for tests. The verifier falsely passes because test validation is skipped when package.json is absent.
+
+PYTHON / RUBY / GO FRESH PROJECT SCAFFOLDING:
+For non-Node projects in an empty workspace, the FIRST subtask MUST be a scaffold that creates the project manifest and .gitignore:
+  Python (no requirements.txt or pyproject.toml found):
+    • requirements.txt — list pytest and all runtime dependencies (e.g. "flask\nrequests\npytest\n")
+    • .gitignore — must include: .venv/, __pycache__/, *.pyc, dist/, build/, *.egg-info/
+    • Optionally pyproject.toml or setup.cfg if the task requires an installable package
+    • After writing, coder must run: execute_bash("python3 -m venv .venv && .venv/bin/pip install -r requirements.txt 2>&1")
+  Ruby (no Gemfile found):
+    • Gemfile — list gem 'rspec' and all runtime gems (run 'bundle init' pattern: source 'https://rubygems.org')
+    • .gitignore — must include: vendor/bundle, .bundle/, *.log, tmp/
+    • After writing, coder must run: execute_bash("bundle install --path vendor/bundle 2>&1")
+  Go (no go.mod found):
+    • Run: execute_bash("go mod init <module-name> 2>&1") — where <module-name> matches the task/directory
+    • .gitignore — must include: *.test, *.out, the compiled binary name
+    • After go mod init, coder must run: execute_bash("go build ./... 2>&1") to confirm the scaffold compiles
+Without these manifest files, test validators cannot run (verifier skips tests), auto-install cannot trigger, and .gitignore checks will fail on every subsequent subtask.
 
 REVIEW-ONLY PLAN PROHIBITION (CRITICAL — prevents sessions that produce zero code changes):
 The projectManager RUNS ONCE and its plan is FINAL. There is NO second planning pass after REVIEW subtasks complete.
@@ -594,6 +636,11 @@ The prompt already specifies the exact file, exact line, and exact change needed
       { role: "user", content: `ORIGINAL TASK:\n${state.messages[0]?.content || ""}` },
       ...(state.intentDocument
         ? [{ role: "user", content: `INTENT ANALYSIS (use success criteria to ensure plan is complete):\n${state.intentDocument}` }]
+        : []),
+      // Reflexion lessons from prior sessions — helps the PM avoid planning approaches
+      // that have repeatedly failed on this specific project.
+      ...(state.reflexionContext
+        ? [{ role: "user", content: `[LESSONS FROM PRIOR SESSIONS ON THIS PROJECT — avoid these failure patterns in your plan]\n${state.reflexionContext}` }]
         : []),
       ...(state.refinedResearch
         ? [{ role: "user", content: `REFINED RESEARCH (condensed key facts — implementation focus):\n${state.refinedResearch}` }]

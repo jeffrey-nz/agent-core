@@ -70,5 +70,32 @@ export async function executeGitTool(name, input, context) {
     return `<git_branch cwd="${cwd}">\n[ERROR] ${res.stderr || res.stdout}\n</git_branch>`;
   }
 
+  if (name === "git_diff") {
+    const staged  = input.staged === true;
+    const base    = input.base;
+    const target  = input.path ? ` -- "${input.path}"` : "";
+
+    let cmd;
+    if (base) {
+      cmd = `git diff --color=never ${base}${target}`;
+    } else if (staged) {
+      cmd = `git diff --cached --color=never${target}`;
+    } else {
+      cmd = `git diff --color=never${target}`;
+    }
+
+    const res = await safeExec(cmd, { cwd });
+    const out = (res.stdout || "").trim();
+
+    if (!out) {
+      const desc = staged ? "staged" : base ? `vs ${base}` : "unstaged";
+      return `<git_diff cwd="${cwd}">\n[INFO] No ${desc} changes${input.path ? " in " + input.path : ""}.\n</git_diff>`;
+    }
+
+    const MAX = 8000;
+    const body = out.length > MAX ? out.slice(0, MAX) + "\n... [DIFF TRUNCATED — use a narrower path or base]" : out;
+    return `<git_diff cwd="${cwd}">\n${body}\n</git_diff>`;
+  }
+
   return undefined;
 }

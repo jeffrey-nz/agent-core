@@ -46,6 +46,53 @@
  *      `2dir` instead of `2*dir`, missing template literal backticks, etc.
  *      → If node --check exits non-zero: FAIL with the exact error message
  *
+ *   5b. PHP SYNTAX CHECK (.php)
+ *      Runs `php -l <file>` on modified PHP files. Catches parse errors before the
+ *      HTTP smoke test hits them and produces a less-actionable HTTP 500.
+ *
+ *  5bb. PYTHON SYNTAX CHECK (.py)
+ *      Runs `python3 -m py_compile <file>` on modified Python files. Catches
+ *      IndentationError, SyntaxError, and invalid token errors at diff-review time.
+ *
+ *  5bc. PYTHON DUPLICATE DEF/CLASS CHECK (.py)
+ *      Detects the "growing file" failure in Python: coder appends a patched
+ *      function/class without removing the original top-level definition.
+ *      Python silently uses the last definition — the earlier one is dead code.
+ *      → If any top-level def/class name appears twice: FAIL
+ *
+ *  5bd. PYTHON EMPTY TEST FILE CHECK (test_*.py / *_test.py)
+ *      A test file that defines no `def test_` functions will have pytest report
+ *      "collected 0 items" and exit 0 — a false-passing test run.
+ *      Catches placeholder test files and test files where all tests were accidentally
+ *      deleted or the coder forgot to write the actual test functions.
+ *      → If a Python test file has no test functions: FAIL with fix instructions
+ *
+ *   5c. RUBY SYNTAX CHECK (.rb)
+ *      Runs `ruby -c <file>` on modified Ruby files. Catches parse errors (missing
+ *      "end", unclosed strings, method syntax errors) at diff-review time.
+ *
+ *  5cc. RUBY DUPLICATE DEF CHECK (.rb)
+ *      Detects the "growing file" failure in Ruby: coder appends a patched method
+ *      without removing the original top-level definition. Ruby silently uses the
+ *      last definition — the earlier one is dead code.
+ *      → If any top-level def name appears twice: FAIL
+ *
+ *  5cd. RUBY EMPTY SPEC FILE CHECK (*_spec.rb)
+ *      An RSpec spec file with no `it`, `specify`, or `example` blocks has RSpec
+ *      report "0 examples, 0 failures" and exit 0 — a false-passing test run.
+ *      Catches placeholder spec files where the coder forgot to write actual tests.
+ *      → If a spec file has no example blocks: FAIL with fix instructions
+ *
+ *   5d. MISSING EXPORT CHECK (.ts, .tsx, .js, .jsx)
+ *      PascalCase filenames (ChessBoard.tsx) are almost always React components.
+ *      A component file with no `export` keyword is dead code — nothing can import it.
+ *      → If no `export` found in a PascalCase component file: FAIL with fix instructions
+ *
+ *   5e. DUPLICATE FUNCTION/CONST CHECK (.js, .mjs, .cjs, .ts, .tsx, .jsx)
+ *      Detects the "growing file" failure: coder appends a patched function without
+ *      removing the original, leaving two definitions of the same name.
+ *      → If any function/const name appears twice in the same file: FAIL
+ *
  *   6. IMPLEMENTATION NOTE MISMATCH (delete/remove instructions not followed)
  *
  *   7. CROSS-FILE HTML-JS ID CONSISTENCY (.js, .ts, .jsx, .tsx, .cjs)
@@ -59,9 +106,52 @@
  *      #game-root when the HTML element is id="game", or #header when HTML
  *      has id="game-header".
  *      → If CSS targets an ID not found in any HTML file: FAIL
+ *
+ *  8a. CSS/SCSS BRACE BALANCE (.css, .scss, .sass)
+ *      Counts opening { vs closing } after stripping comments. An unmatched
+ *      brace silently drops all subsequent styles — the HTTP smoke test passes
+ *      (200 OK) but the page looks broken.
+ *      → If brace counts differ: FAIL with missing/extra count
+ *
  *      If the subtask's implementation_note says "DELETE", "REMOVE", or "must be deleted"
  *      for a specific line, reads the target file and checks if that pattern still exists.
  *      → If the old pattern is still present: FAIL with exact line reference
+ *
+ *  10. GIT CONFLICT MARKERS (any text file)
+ *      Detects unresolved merge conflict markers: <<<<<<< HEAD, =======, >>>>>>> branch.
+ *      These make files unparseable and cause immediate syntax/runtime errors.
+ *      → If conflict markers found: FAIL with exact line numbers
+ *
+ *  11. ESM / COMMONJS MISMATCH (.mjs, .cjs, .js, .jsx)
+ *      .mjs files using require() → ReferenceError at runtime (ESM-only).
+ *      .cjs files using static import → SyntaxError (CommonJS-only).
+ *      .js files in a "type":"module" package using require() → ReferenceError.
+ *      → If mismatch detected: FAIL with fix instructions
+ *
+ *  12. YAML SYNTAX CHECK (.yml, .yaml)
+ *      Parses modified YAML files with js-yaml. Catches bad indentation, unclosed
+ *      strings, duplicate keys at the same level, and other structural errors.
+ *      → If parse fails: FAIL with the exact line number and fix advice
+ *
+ *  13. JSON SYNTAX CHECK (.json)
+ *      Parses modified JSON files with JSON.parse(). Catches trailing commas,
+ *      missing commas, unquoted keys, JS-style comments, and single-quoted strings.
+ *      → If parse fails: FAIL with the SyntaxError message and fix advice
+ *
+ *  14. GO BUILD + VET CHECK (project-level, runs once if any .go files were modified)
+ *      Runs `go build ./...` to catch compile errors (undefined names, type mismatches,
+ *      missing imports) that per-file regex checks cannot find.
+ *      If build succeeds, also runs `go vet ./...` to catch semantic issues: wrong
+ *      Printf format strings, mutex copying, unreachable code, etc.
+ *      → If build fails and go is installed: FAIL with go build output
+ *      → If vet fails: FAIL with go vet output
+ *
+ *  15. GO TEST FILE NAMING (.go files that contain func Test… but don't end in _test.go)
+ *      Go only runs tests in files ending with `_test.go`. A file named `test_foo.go`
+ *      or `calculator_test_helpers.go` that defines `func TestFoo(t *testing.T)` will
+ *      compile as regular package code but its tests are NEVER executed by `go test`.
+ *      The build passes, `go test ./...` reports "ok" with 0 tests, giving false confidence.
+ *      → If test functions found in a non-_test.go file: FAIL with rename instructions
  *
  * Position in graph: coder → patchReviewer → [OK] verifier
  *                                           → [FAIL] coder
@@ -78,6 +168,7 @@ import { eventBus } from "#web/eventBus.js";
 import { personaMeta } from "../personas.js";
 import { MAX_VERIFIER_RETRIES } from "#config/pipeline.js";
 import { execAsync } from "#utils/exec.js";
+import yaml from "js-yaml";
 
 const PERSONA = personaMeta("patchReviewer");
 
@@ -318,6 +409,33 @@ async function collectHtmlIds(projectDir) {
 }
 
 /**
+ * Collect all id="X" attribute values from .ss template files in the project.
+ * SilverStripe projects define IDs in .ss templates, not .html files, so this
+ * is called after collectHtmlIds to supplement the ID set.
+ */
+async function collectSsTemplateIds(projectDir, ids) {
+  const walk = async (dir) => {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.name.startsWith(".") || e.name === "node_modules" || e.name === "vendor") continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (/\.ss$/i.test(e.name)) {
+          try {
+            const src = await fs.readFile(full, "utf8");
+            const re = /\bid\s*=\s*["']([^"']+)["']/gi;
+            let m;
+            while ((m = re.exec(src)) !== null) ids.add(m[1].trim());
+          } catch { /* skip unreadable */ }
+        }
+      }
+    } catch { /* non-fatal */ }
+  };
+  await walk(projectDir);
+}
+
+/**
  * Check a JS file for document.getElementById("X") calls whose ID is not
  * present in any HTML file in the project. Handles simple string literals;
  * skips dynamic/computed IDs (e.g. "tableau-" + i → prefix "tableau-" is
@@ -341,6 +459,23 @@ function analyzeJsIdRefs(content, filename, htmlIds) {
         description:
           `Line ${lineNo}: \`getElementById("${id}")\` — but no HTML element has \`id="${id}"\`.\n` +
           `Either add \`id="${id}"\` to the correct HTML element, or fix the ID string to match the HTML.\n` +
+          `HTML ids found: ${[...htmlIds].join(", ")}`,
+      });
+    }
+  }
+
+  // Match: querySelector('#literal') or querySelectorAll('#literal')
+  // Only flag when the selector is a plain #id (not a compound like '#foo .bar')
+  const qsIdRe = /querySelectorAll?\(\s*["']#([\w-]+)["']\s*\)/g;
+  while ((m = qsIdRe.exec(content)) !== null) {
+    const id = m[1];
+    if (!htmlIds.has(id)) {
+      const lineNo = content.slice(0, m.index).split("\n").length;
+      issues.push({
+        type: "JS_MISSING_HTML_ID",
+        description:
+          `Line ${lineNo}: \`querySelector("#${id}")\` — but no HTML element has \`id="${id}"\`.\n` +
+          `Either add \`id="${id}"\` to the correct HTML element, or fix the selector to match the HTML.\n` +
           `HTML ids found: ${[...htmlIds].join(", ")}`,
       });
     }
@@ -460,8 +595,9 @@ export async function patchReviewerNode(state) {
   const implementationNote = currentSubtask?.implementationNote || currentSubtask?.implementation_note || "";
   const deletionRequirements = extractDeletionRequirements(implementationNote);
 
-  // Clear per-subtask HTML ID cache so a fresh HTML scan happens each time
+  // Clear per-subtask caches so each review pass starts fresh
   globalThis.__patchReviewHtmlIds = null;
+  globalThis.__patchReviewPkgType = null;
 
   const allIssues = [];
 
@@ -580,6 +716,250 @@ export async function patchReviewerNode(state) {
       }
     }
 
+    // 5b. PHP syntax check — run `php -l` on modified PHP files.
+    // Catches parse errors (missing semicolons, mismatched braces, invalid tokens)
+    // before the HTTP smoke test can hit them and produce a less actionable 500.
+    if (/\.php$/i.test(ext) && !relPath.includes("vendor/")) {
+      const phpResult = await execAsync(`php -l ${JSON.stringify(absPath)}`);
+      if (phpResult.status !== 0) {
+        const errText = (phpResult.stdout || phpResult.stderr || "").trim();
+        // Only report when output contains actual PHP error messages.
+        // Only report when output contains actual PHP error messages.
+        // Skip if php is not installed ("command not found").
+        if (!/command not found|No such file|not found/i.test(errText) && errText.length > 0) {
+          allIssues.push({
+            file: relPath,
+            type: "PHP_SYNTAX_ERROR",
+            description:
+              `PHP syntax error detected by \`php -l\`:\n\n${errText}\n\n` +
+              `Fix the syntax error(s) above using write_file or patch_file before this subtask can pass.`,
+          });
+        }
+      }
+    }
+
+    // 5bb. Python syntax check — run `python3 -m py_compile` on modified .py files.
+    // Catches IndentationError, SyntaxError, and invalid token errors before they
+    // surface at runtime as a cryptic ImportError or traceback.
+    if (/\.py$/i.test(ext) && !relPath.includes("/.venv/") && !relPath.includes("/site-packages/")) {
+      const pyResult = await execAsync(`python3 -m py_compile ${JSON.stringify(absPath)} 2>&1`);
+      if (pyResult.status !== 0) {
+        const errText = (pyResult.stdout || pyResult.stderr || "").trim();
+        // Only report when the output contains actual Python error messages.
+        // Silently skip if python3 is not installed (errText will say "command not found").
+        if (/SyntaxError:|IndentationError:|py_compile|invalid syntax|unexpected indent|EOL while|EOF while|line \d|^\s*\^/im.test(errText)) {
+          allIssues.push({
+            file: relPath,
+            type: "PYTHON_SYNTAX_ERROR",
+            description:
+              `Python syntax error detected by \`python3 -m py_compile\`:\n\n${errText}\n\n` +
+              `Fix the syntax error(s) above before this subtask can pass.\n` +
+              `Common causes: bad indentation, missing colon after if/def/class, unclosed bracket or string.`,
+          });
+        }
+      }
+    }
+
+    // 5bc. Python duplicate def/class check — catches "growing file" regression in .py files.
+    //      Happens when the coder appends a fixed function without removing the original.
+    //      Two top-level definitions of the same name cause the second to silently shadow
+    //      the first (Python doesn't error on redefinition).
+    if (/\.py$/i.test(ext) && !relPath.includes("/.venv/") && !relPath.includes("/site-packages/")) {
+      const pyNames = [];
+      // Only match top-level defs/classes (no leading indentation) to avoid false
+      // positives from methods inside different classes with the same name.
+      const pyFuncRe = /^def\s+([A-Za-z_]\w*)\s*[(:]/gm;
+      const pyClassRe = /^class\s+([A-Za-z_]\w*)\s*[:(]/gm;
+      let pm;
+      while ((pm = pyFuncRe.exec(content)) !== null) pyNames.push(pm[1]);
+      while ((pm = pyClassRe.exec(content)) !== null) pyNames.push(pm[1]);
+      const pySeen = new Set();
+      const pyDupes = new Set();
+      for (const n of pyNames) {
+        if (pySeen.has(n)) pyDupes.add(n);
+        else pySeen.add(n);
+      }
+      if (pyDupes.size > 0) {
+        const dupeList = [...pyDupes].join(", ");
+        allIssues.push({
+          file: relPath,
+          type: "PYTHON_DUPLICATE_DEF",
+          description:
+            `File "${relPath}" defines these top-level names more than once: ${dupeList}\n\n` +
+            `This usually happens when a patched version was appended without removing the original.\n` +
+            `Python silently uses the LAST definition, so the earlier version is dead code.\n\n` +
+            `FIX: Use patch_file to REPLACE the old definition with the new one — do not append a second copy.\n` +
+            `Search the file for each duplicate name and delete all but the correct (final) version.`,
+        });
+      }
+    }
+
+    // 5bd. Python empty test file check — catches test files that define no test functions.
+    //      pytest exits 0 and reports "collected 0 items" for such files, giving false
+    //      confidence that the test suite ran correctly when it actually ran nothing.
+    const isPyTestFile = /\.py$/i.test(ext) &&
+      (/(?:^|[\\/])test_[^/\\]+\.py$/i.test(relPath) || /[^/\\]+_test\.py$/i.test(relPath) ||
+       /[\\/](?:tests?|test_suite)[\\/]/i.test(relPath));
+    if (isPyTestFile && !relPath.includes("/.venv/") && !relPath.includes("/site-packages/")) {
+      // A test function must start with "def test_" (pytest convention).
+      // Also accept class-based tests: methods starting with "def test_" inside a class.
+      const hasTestFn = /^\s*def\s+test_/m.test(content);
+      if (!hasTestFn) {
+        allIssues.push({
+          file: relPath,
+          type: "PYTHON_EMPTY_TEST_FILE",
+          description:
+            `Test file "${relPath}" contains no test functions (no \`def test_*\` found).\n\n` +
+            `pytest will report "collected 0 items" and exit 0 — the test suite appears to pass ` +
+            `but is running NOTHING.\n\n` +
+            `Common causes:\n` +
+            `  - The test function was accidentally deleted or never written\n` +
+            `  - Methods were named incorrectly (e.g. \`def check_foo\` instead of \`def test_foo\`)\n` +
+            `  - Test class has no methods starting with \`test_\`\n\n` +
+            `FIX: Add at least one test function matching \`def test_<name>(...):\` to this file.\n` +
+            `Every test assertion must live inside a function that starts with "test_".`,
+        });
+      }
+    }
+
+    // 5c. Ruby syntax check — run `ruby -c` on modified .rb files.
+    // Catches parse errors (unexpected end, unterminated string, syntax error)
+    // before they surface at runtime as a SyntaxError from the Ruby interpreter.
+    if (/\.rb$/i.test(ext) && !relPath.includes("/vendor/") && !relPath.includes("/gems/")) {
+      const rubyResult = await execAsync(`ruby -c ${JSON.stringify(absPath)} 2>&1`);
+      if (rubyResult.status !== 0) {
+        const errText = (rubyResult.stdout || rubyResult.stderr || "").trim();
+        // Only report when output contains actual Ruby error messages.
+        // Skip if ruby is not installed ("command not found").
+        if (!/command not found|No such file|not found/i.test(errText) && errText.length > 0) {
+          allIssues.push({
+            file: relPath,
+            type: "RUBY_SYNTAX_ERROR",
+            description:
+              `Ruby syntax error detected by \`ruby -c\`:\n\n${errText}\n\n` +
+              `Fix the syntax error(s) above using write_file or patch_file before this subtask can pass.\n` +
+              `Common causes: missing "end" keyword, unclosed string/heredoc, mismatched do/end blocks.`,
+          });
+        }
+      }
+    }
+
+    // 5cc. Ruby duplicate def check — catches "growing file" regression in .rb files.
+    //      Happens when the coder appends a fixed method without removing the original.
+    //      Ruby silently uses the LAST definition, so earlier versions become dead code.
+    //      Only checks top-level (no indentation) methods to avoid false positives from
+    //      same-named methods in different classes or modules.
+    if (/\.rb$/i.test(ext) && !relPath.includes("/vendor/") && !relPath.includes("/gems/")) {
+      const rbNames = [];
+      // Match top-level instance methods: `def method_name`
+      // and top-level class methods: `def self.method_name`
+      const rbDefRe = /^def\s+(?:self\.)?([a-z_][a-zA-Z0-9_?!]*)/gm;
+      let rm;
+      while ((rm = rbDefRe.exec(content)) !== null) rbNames.push(rm[1]);
+      const rbSeen = new Set();
+      const rbDupes = new Set();
+      for (const n of rbNames) {
+        if (rbSeen.has(n)) rbDupes.add(n);
+        else rbSeen.add(n);
+      }
+      if (rbDupes.size > 0) {
+        const dupeList = [...rbDupes].join(", ");
+        allIssues.push({
+          file: relPath,
+          type: "RUBY_DUPLICATE_DEF",
+          description:
+            `File "${relPath}" defines these top-level methods more than once: ${dupeList}\n\n` +
+            `This usually happens when a patched version was appended without removing the original.\n` +
+            `Ruby silently uses the LAST definition, so the earlier version is dead code.\n\n` +
+            `FIX: Use patch_file to REPLACE the old method with the new one — do not append a second copy.\n` +
+            `Search the file for each duplicate method name and delete all but the correct (final) version.`,
+        });
+      }
+    }
+
+    // 5cd. Ruby empty spec file check — catches RSpec files that define no examples.
+    //      RSpec exits 0 with "0 examples, 0 failures" for spec files with no `it` blocks,
+    //      giving false confidence that the test suite ran. Catches placeholder specs.
+    const isRubySpecFile = /\.rb$/i.test(ext) &&
+      (filename.endsWith("_spec.rb") || relPath.includes("/spec/"));
+    if (isRubySpecFile && !relPath.includes("/vendor/") && !relPath.includes("/gems/")) {
+      // RSpec example blocks: it, specify, example (plus xit/xspecify for pending)
+      const hasExample = /^\s*(?:x?it|x?specify|x?example)\s*[(\s'"]/m.test(content);
+      if (!hasExample) {
+        allIssues.push({
+          file: relPath,
+          type: "RUBY_EMPTY_SPEC_FILE",
+          description:
+            `Spec file "${relPath}" contains no RSpec examples (no \`it\`, \`specify\`, or \`example\` blocks).\n\n` +
+            `RSpec will report "0 examples, 0 failures" and exit 0 — the test suite appears to pass ` +
+            `but is running NOTHING.\n\n` +
+            `Common causes:\n` +
+            `  - The \`it\` block was never written (only a \`describe\`/\`context\` shell exists)\n` +
+            `  - Tests were named incorrectly (e.g. \`test\` instead of \`it\`)\n` +
+            `  - File is a placeholder that was never completed\n\n` +
+            `FIX: Add at least one \`it 'description' do ... end\` block inside a describe/context block.\n` +
+            `Every RSpec assertion must live inside an \`it\` (or \`specify\`/\`example\`) block.`,
+        });
+      }
+    }
+
+    // 5d. Missing export check — PascalCase component files without any exports.
+    //     PascalCase filenames (ChessBoard.tsx, GameStatus.tsx) are almost always
+    //     React components. A file that defines no export can't be imported by App.tsx.
+    //     Root cause: burned 742s in one session before check.js revealed the missing `export`.
+    if (/\.(tsx?|jsx?)$/i.test(ext)) {
+      const baseFilename = path.basename(filename, path.extname(filename));
+      const isPascalCase = /^[A-Z][a-zA-Z0-9]*$/.test(baseFilename);
+      const isTestFile = /\.(test|spec)\.[^.]+$/.test(filename);
+      const isEntryFile = /^(index|main|app|vite\.config|tailwind\.config|jest\.config|eslint\.config)$/i.test(baseFilename);
+      if (isPascalCase && !isTestFile && !isEntryFile && !/\bexport\b/.test(content)) {
+        allIssues.push({
+          file: relPath,
+          type: "MISSING_EXPORT",
+          description:
+            `Component file "${relPath}" defines no exports.\n\n` +
+            `PascalCase component files MUST export at least one symbol so they can be imported by App.tsx or parent components.\n\n` +
+            `Add "export" before the definition:\n` +
+            `  export function ${baseFilename}() { ... }\n` +
+            `  // or\n` +
+            `  export default function ${baseFilename}() { ... }\n\n` +
+            `Without an export, this file is dead code — nothing can import it.`,
+        });
+      }
+    }
+
+    // 5d. Duplicate function/const definition check — catches "growing file" regression.
+    //     Happens when the coder appends a fixed function without removing the original.
+    //     Two definitions of the same function cause bundler errors or silent runtime bugs.
+    if (/\.(m?js|cjs|jsx|tsx|ts)$/i.test(ext)) {
+      // Match named function declarations and named arrow-function const assignments
+      const funcNames = [];
+      const funcDeclRe = /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*[(<]/gm;
+      const arrowRe = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(?/gm;
+      let m2;
+      while ((m2 = funcDeclRe.exec(content)) !== null) funcNames.push(m2[1]);
+      while ((m2 = arrowRe.exec(content)) !== null) funcNames.push(m2[1]);
+      const seen = new Set();
+      const dupes = new Set();
+      for (const n of funcNames) {
+        if (seen.has(n)) dupes.add(n);
+        else seen.add(n);
+      }
+      if (dupes.size > 0) {
+        const dupeList = [...dupes].join(", ");
+        allIssues.push({
+          file: relPath,
+          type: "DUPLICATE_FUNCTION",
+          description:
+            `File "${relPath}" defines these names more than once: ${dupeList}\n\n` +
+            `This usually happens when a patched version was appended without removing the original.\n` +
+            `Having two definitions of the same function causes bundler errors or uses the wrong version silently.\n\n` +
+            `FIX: Use patch_file to REPLACE the old definition with the new one — do not append a second copy.\n` +
+            `Search the file for each duplicate name and delete all but the correct version.`,
+        });
+      }
+    }
+
     // 6. TypeScript file in a non-TypeScript project — catches .ts/.tsx files
     //    written to a project with no tsconfig.json or package.json (vanilla HTML/JS).
     //    The browser cannot execute TypeScript directly; without a bundler it is dead code.
@@ -598,12 +978,14 @@ export async function patchReviewerNode(state) {
       }
     }
 
-    // 7. Cross-file HTML-JS ID consistency — catch getElementById("X") calls
-    //    where no HTML element in the project has id="X".
-    //    Loaded lazily so the HTML walk only runs once per patchReviewer pass.
+    // 7. Cross-file HTML-JS ID consistency — catch getElementById("X") and
+    //    querySelector('#X') calls where no HTML element has id="X".
+    //    Loaded lazily so the HTML/.ss walk only runs once per patchReviewer pass.
     if (/\.(m?js|cjs|jsx|tsx|ts)$/i.test(ext)) {
       if (!globalThis.__patchReviewHtmlIds) {
         globalThis.__patchReviewHtmlIds = await collectHtmlIds(projectDir);
+        // Also pull IDs from SilverStripe .ss templates which define most HTML structure
+        await collectSsTemplateIds(projectDir, globalThis.__patchReviewHtmlIds);
       }
       const htmlIds = globalThis.__patchReviewHtmlIds;
       if (htmlIds.size > 0) {
@@ -619,6 +1001,7 @@ export async function patchReviewerNode(state) {
     if (/\.css$/i.test(ext)) {
       if (!globalThis.__patchReviewHtmlIds) {
         globalThis.__patchReviewHtmlIds = await collectHtmlIds(projectDir);
+        await collectSsTemplateIds(projectDir, globalThis.__patchReviewHtmlIds);
       }
       const htmlIds = globalThis.__patchReviewHtmlIds;
       if (htmlIds.size > 0) {
@@ -629,7 +1012,193 @@ export async function patchReviewerNode(state) {
       }
     }
 
-    // 6. Implementation note deletion check
+    // 8a. CSS/SCSS brace-balance check — catches unmatched { } pairs before visual
+    //     verification. An unclosed rule silently drops all subsequent styles; the HTTP
+    //     smoke test returns 200 but the page looks broken.
+    if (/\.(css|scss|sass)$/i.test(ext)) {
+      // Strip comments before counting (block comments may contain braces)
+      const strippedCss = content
+        .replace(/\/\*[\s\S]*?\*\//g, "")   // /* block comments */
+        .replace(/\/\/[^\n]*/g, "");         // // line comments (SCSS/Sass)
+      const opens  = (strippedCss.match(/\{/g) || []).length;
+      const closes = (strippedCss.match(/\}/g) || []).length;
+      if (opens !== closes) {
+        const diff = opens - closes;
+        allIssues.push({
+          file: relPath,
+          type: "CSS_BRACE_IMBALANCE",
+          description:
+            `CSS/SCSS brace imbalance in "${relPath}": ` +
+            `${opens} opening { vs ${closes} closing } (${diff > 0 ? `${diff} unclosed` : `${-diff} extra`}).\n\n` +
+            `An unmatched brace causes all subsequent rules to be silently ignored.\n` +
+            `Common cause: missing closing } after the last rule block, or an extra } ` +
+            `leftover from a deleted block.\n\n` +
+            `FIX: Count blocks manually — every opening { for a rule, @media, @keyframes, or ` +
+            `.selector must have a matching }. Run through the file top-to-bottom.`,
+        });
+      }
+    }
+
+    // 13. JSON syntax check — validate .json files with JSON.parse().
+    //     Skip machine-generated lock files and .jsonl streaming files.
+    if (
+      ext === ".json" &&
+      !filename.endsWith("-lock.json") &&
+      !filename.endsWith(".lock.json") &&
+      filename !== "package-lock.json" &&
+      filename !== "yarn.lock" &&
+      filename !== "pnpm-lock.yaml"
+    ) {
+      try {
+        JSON.parse(content);
+      } catch (jsonErr) {
+        allIssues.push({
+          file: relPath,
+          type: "JSON_SYNTAX_ERROR",
+          description:
+            `JSON syntax error in "${relPath}":\n\n  ${jsonErr.message || "Parse failed"}\n\n` +
+            `Common AI mistakes in JSON:\n` +
+            `  - Trailing comma after last element: [1, 2, 3,] or {"a": 1,}\n` +
+            `  - Missing comma between items: {"a": 1 "b": 2}\n` +
+            `  - Unquoted keys: {name: "value"} → must be {"name": "value"}\n` +
+            `  - JavaScript-style comments: // or /* */ (not valid in JSON)\n` +
+            `  - Single-quoted strings: 'value' → must be "value"\n` +
+            `Fix the JSON and re-run to verify.`,
+        });
+      }
+    }
+
+    // 12. YAML syntax check — parse with js-yaml to catch structural errors.
+    //     Skip the SilverStripe-specific check (#2) scope; this is a general syntax gate.
+    //     Exclude lock files and node_modules-adjacent YAML that tends to have edge cases.
+    if (/\.(yml|yaml)$/i.test(ext) && !relPath.includes("node_modules") && !relPath.endsWith(".lock")) {
+      try {
+        yaml.load(content, { json: false });
+      } catch (yamlErr) {
+        const lineHint = yamlErr.mark ? ` (line ${yamlErr.mark.line + 1})` : "";
+        allIssues.push({
+          file: relPath,
+          type: "YAML_SYNTAX_ERROR",
+          description:
+            `YAML syntax error in "${relPath}"${lineHint}:\n\n  ${yamlErr.message?.split("\n")[0] || yamlErr.reason || "Parse failed"}\n\n` +
+            `Common causes:\n` +
+            `  - Wrong indentation (YAML uses spaces, never tabs)\n` +
+            `  - Missing space after colon: key:value → must be key: value\n` +
+            `  - Unclosed string or multi-line block scalar\n` +
+            `  - Duplicate key at the same nesting level\n` +
+            `Fix the YAML structure, then verify by checking the indentation carefully.`,
+        });
+      }
+    }
+
+    // 10. Git conflict markers — unresolved <<<<<<< / ======= / >>>>>>> left in file
+    const conflictMatch = content.match(/^(<{7}[^\n]*|={7}|>{7}[^\n]*)/m);
+    if (conflictMatch) {
+      const markerLine = content.slice(0, content.indexOf(conflictMatch[0])).split("\n").length;
+      allIssues.push({
+        file: relPath,
+        type: "GIT_CONFLICT_MARKERS",
+        description:
+          `File "${relPath}" contains unresolved git conflict markers starting at line ${markerLine}:\n\n` +
+          `  ${conflictMatch[0].slice(0, 80)}\n\n` +
+          `These markers make the file unparseable. You MUST resolve the conflict by choosing one version:\n` +
+          `  1. Use patch_file to delete the conflict markers AND one of the two conflicting blocks.\n` +
+          `  2. Keep ONLY the lines between <<<<<<< HEAD ... ======= (your changes), OR\n` +
+          `     keep ONLY the lines between ======= ... >>>>>>> (the incoming changes).\n` +
+          `  3. Remove ALL three marker lines (<<<<<<< HEAD, =======, >>>>>>>).`,
+      });
+    }
+
+    // 11. ESM / CommonJS module mismatch
+    //     .mjs files are always ESM — require() is not available.
+    //     .cjs files are always CommonJS — static import is not available.
+    //     .js files in a "type":"module" package are ESM — require() will crash at runtime.
+    if (/\.(mjs|cjs|js|jsx|ts|tsx)$/i.test(ext)) {
+      const isMjs = ext === ".mjs";
+      const isCjs = ext === ".cjs";
+
+      if (isMjs) {
+        // Detect bare require( calls (not inside comments or strings — best-effort)
+        const reqMatch = content.match(/(?:^|[^/\w])require\s*\(/m);
+        if (reqMatch) {
+          const lineNo = content.slice(0, content.indexOf(reqMatch[0].trim().startsWith("r") ? reqMatch[0] : reqMatch[0].slice(1))).split("\n").length;
+          allIssues.push({
+            file: relPath,
+            type: "CJS_IN_ESM_FILE",
+            description:
+              `File "${relPath}" has a .mjs extension (ESM module) but uses CommonJS \`require()\`.\n` +
+              `\`require\` is NOT available in .mjs files — it will throw ReferenceError at runtime.\n` +
+              `FIX: Replace \`require('...')\` with \`import ... from '...'\` (or use dynamic \`import('...')\` for conditional loads).`,
+          });
+        }
+      } else if (isCjs) {
+        // Static import syntax is invalid in .cjs files
+        const importMatch = content.match(/^import\s+[\w*{]/m);
+        if (importMatch) {
+          allIssues.push({
+            file: relPath,
+            type: "ESM_IN_CJS_FILE",
+            description:
+              `File "${relPath}" has a .cjs extension (CommonJS module) but uses ESM \`import ... from\` syntax.\n` +
+              `Static \`import\` is NOT valid in .cjs files — Node.js will throw a SyntaxError.\n` +
+              `FIX: Replace \`import X from '...'\` with \`const X = require('...')\`.`,
+          });
+        }
+      } else if (/\.(js|jsx)$/i.test(ext) && projectDir) {
+        // For .js files check if the project declares "type":"module" in package.json
+        if (!globalThis.__patchReviewPkgType) {
+          try {
+            const pkgRaw = await fs.readFile(path.join(projectDir, "package.json"), "utf8");
+            globalThis.__patchReviewPkgType = JSON.parse(pkgRaw).type || "commonjs";
+          } catch {
+            globalThis.__patchReviewPkgType = "commonjs";
+          }
+        }
+        if (globalThis.__patchReviewPkgType === "module") {
+          const reqMatch = content.match(/(?:^|[^/\w])require\s*\(/m);
+          if (reqMatch) {
+            allIssues.push({
+              file: relPath,
+              type: "CJS_IN_ESM_PROJECT",
+              description:
+                `File "${relPath}" uses \`require()\` but this project has "type":"module" in package.json (ESM mode).\n` +
+                `\`require\` is NOT available in ESM projects by default — it will throw ReferenceError at runtime.\n` +
+                `FIX: Replace \`require('...')\` with \`import ... from '...'\` at the top of the file.\n` +
+                `If CommonJS is genuinely needed, use \`import { createRequire } from 'module'; const require = createRequire(import.meta.url);\``,
+            });
+          }
+        }
+      }
+    }
+
+    // 15. Go test file naming check — catches test functions in files that won't be run.
+    //     Go only treats files ending in _test.go as test files. A coder who writes
+    //     func TestFoo(t *testing.T) in test_calculator.go or calculator_helpers.go
+    //     will see `go test ./...` report "ok (cached)" with 0 tests — the tests are
+    //     compiled as normal package code and silently never executed.
+    if (/\.go$/i.test(ext) && !filename.endsWith("_test.go")) {
+      const goTestFnRe = /^func\s+(Test[A-Z]\w*)\s*\(\s*t\s+\*testing\.T\s*\)/m;
+      const goTestMatch = goTestFnRe.exec(content);
+      if (goTestMatch) {
+        const base = path.basename(filename, ".go");
+        const suggestedName = base.replace(/^test_/, "") + "_test.go";
+        allIssues.push({
+          file: relPath,
+          type: "GO_TEST_FILE_MISNAMED",
+          description:
+            `File "${relPath}" contains Go test functions (e.g. ${goTestMatch[1]}) but does NOT end in "_test.go".\n\n` +
+            `Go only runs tests in files named "*_test.go". Any func Test… in this file is compiled ` +
+            `as regular package code and will NEVER be executed by \`go test\`.\n\n` +
+            `FIX: Rename the file to end with "_test.go", e.g. "${suggestedName}".\n` +
+            `  - Use execute_bash("mv ${relPath} ${path.join(path.dirname(relPath), suggestedName)}")\n` +
+            `  - The package declaration at the top should be "package <pkg>_test" (external test) ` +
+            `or "package <pkg>" (internal test), matching your other test files.\n\n` +
+            `After renaming, re-run: go test ./...`,
+        });
+      }
+    }
+
+    // 9. Implementation note deletion check
     if (deletionRequirements.length > 0) {
       for (const pattern of deletionRequirements) {
         // Escape the pattern for use as a simple string search
@@ -650,6 +1219,56 @@ export async function patchReviewerNode(state) {
           // Regex compilation failed — skip this pattern
         }
       }
+    }
+  }
+
+  // Project-level Go build + vet checks — runs once if any .go files were modified.
+  // go build catches compilation errors (undefined variables, type mismatches,
+  // missing imports) that per-file heuristics can't detect.
+  // go vet catches semantic issues in code that compiles: wrong Printf format strings,
+  // unreachable code after return, mutex copying, and other common mistakes.
+  const hasGoFiles = modifiedFiles.some((f) => /\.go$/i.test(f));
+  if (hasGoFiles && projectDir) {
+    try {
+      await fs.access(path.join(projectDir, "go.mod"));
+      const goResult = await execAsync("go build ./... 2>&1", { cwd: projectDir, timeout: 60000 });
+      const goOut = (goResult.stdout || goResult.stderr || "").trim();
+      if (/command not found|No such file/i.test(goOut)) {
+        // go not installed — skip silently
+      } else if (goResult.status !== 0 && goOut.length > 0) {
+        allIssues.push({
+          file: "(project)",
+          type: "GO_BUILD_ERROR",
+          description:
+            `Go build failed:\n\n${goOut}\n\n` +
+            `Common causes:\n` +
+            `  - Undefined variable or function (check spelling and imports)\n` +
+            `  - Type mismatch (check function signatures match usage)\n` +
+            `  - Missing import path (run go mod tidy if a package is unknown)\n` +
+            `  - Undeclared name — ensure the symbol is exported from its package\n\n` +
+            `Fix all build errors above before this subtask can pass.`,
+        });
+      } else if (goResult.status === 0) {
+        // Build succeeded — also run go vet to catch semantic issues
+        const vetResult = await execAsync("go vet ./... 2>&1", { cwd: projectDir, timeout: 30000 });
+        const vetOut = (vetResult.stdout || vetResult.stderr || "").trim();
+        if (!/command not found|No such file/i.test(vetOut) && vetResult.status !== 0 && vetOut.length > 0) {
+          allIssues.push({
+            file: "(project)",
+            type: "GO_VET_ERROR",
+            description:
+              `go vet found issues that will cause runtime bugs:\n\n${vetOut}\n\n` +
+              `Common causes:\n` +
+              `  - Wrong Printf/Sprintf format verb (e.g. %d for a string → "bad verb")\n` +
+              `  - Mutex or sync.WaitGroup copied by value (pass pointer instead)\n` +
+              `  - Unreachable code after return/break/continue\n` +
+              `  - Incorrect error interface implementation\n\n` +
+              `Fix all vet errors above — they compile but cause incorrect behaviour at runtime.`,
+          });
+        }
+      }
+    } catch {
+      // go.mod not found or access error — skip Go check
     }
   }
 

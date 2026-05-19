@@ -201,6 +201,11 @@ RULES:
     ...(state.intentDocument
       ? [{ role: "user", content: `[USER INTENT ANALYSIS — success criteria to guide your scoping]\n${state.intentDocument}` }]
       : []),
+    // Inject reflexion lessons so the scoper knows about phantom-path mistakes and
+    // incorrect file locations from prior sessions on this project.
+    ...(state.reflexionContext
+      ? [{ role: "user", content: `[LESSONS FROM PRIOR SESSIONS — verify these file paths haven't changed before relying on them]\n${state.reflexionContext}` }]
+      : []),
     {
       role: "user",
       content: `ORIGINAL TASK:\n${userTask}${invariantsBlock}${refinedBlock}\n\nFULL RESEARCH REPORT (verify all paths with tools):\n${researchReport}`,
@@ -284,7 +289,7 @@ RULES:
 
     // If all tool calls were execute_bash with no file reads, the model got stuck
     // in an echo/exit loop. Force degenerate to skip refinement (same loop would occur).
-    if (Array.isArray(result?.toolCalls) && result.toolCalls.length >= 2) {
+    if (Array.isArray(result?.toolCalls) && result.toolCalls.length >= 1) {
       const fileReadTools = new Set(["read_file", "find_file", "list_dir", "grep", "search_files"]);
       const hasAnyRead = result.toolCalls.some((tc) =>
         fileReadTools.has((tc.tool || tc.name || "").toLowerCase()),
@@ -293,7 +298,7 @@ RULES:
         (tc.tool || tc.name || "").toLowerCase() === "execute_bash",
       );
       if (allBash && !hasAnyRead) {
-        log(colors.yellow("  [Graph] -> Scoper: all tool calls were execute_bash with no file reads — skipping refinement, using research fallback."));
+        log(colors.yellow(`  [Graph] -> Scoper: ${result.toolCalls.length === 1 ? "only" : "all"} tool call(s) were execute_bash with no file reads — skipping refinement, using research fallback.`));
         scopeDocument = "";
       }
     }

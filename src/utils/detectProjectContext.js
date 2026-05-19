@@ -66,6 +66,30 @@ export function isPythonProject(rootDir) {
 }
 
 /**
+ * Returns true if rootDir appears to be a Ruby project.
+ * Detection: Gemfile present in the root.
+ */
+export function isRubyProject(rootDir) {
+  try {
+    return fs.existsSync(path.join(rootDir, "Gemfile"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true if rootDir appears to be a Go project.
+ * Detection: go.mod present in the root.
+ */
+export function isGoProject(rootDir) {
+  try {
+    return fs.existsSync(path.join(rootDir, "go.mod"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Returns true if rootDir appears to be a SilverStripe project.
  * Detection: composer.json + vendor/silverstripe/framework OR a _config/ directory.
  */
@@ -115,7 +139,9 @@ export function detectProjectContext(rootDir) {
 
   const isPhp = fs.existsSync(path.join(rootDir, "composer.json"));
   const isNode = fs.existsSync(path.join(rootDir, "package.json"));
-  const isPython = !isNode && !isPhp && isPythonProject(rootDir);
+  const isRuby = !isNode && !isPhp && isRubyProject(rootDir);
+  const isGo = !isNode && !isPhp && !isRuby && isGoProject(rootDir);
+  const isPython = !isNode && !isPhp && !isRuby && !isGo && isPythonProject(rootDir);
   const isSilverStripe = !unity && isSilverStripeProject(rootDir);
 
   let projectType = "unknown";
@@ -126,10 +152,12 @@ export function detectProjectContext(rootDir) {
   else if (isSilverStripe) projectType = "silverstripe";
   else if (isPhp) projectType = "php";
   else if (isNode) projectType = "node";
+  else if (isRuby) projectType = "ruby";
+  else if (isGo) projectType = "go";
   else if (isPython) projectType = "python";
 
-  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython });
+  const constraints = buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython, isRuby, isGo });
   const researchDirective = buildResearchDirective(projectType);
 
-  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython, projectType, constraints, researchDirective };
+  return { isUnity: unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython, isRuby, isGo, projectType, constraints, researchDirective };
 }

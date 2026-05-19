@@ -53,4 +53,30 @@ export const gitTools = {
         .describe("Absolute path to the git repository"),
     }),
   },
+
+  git_diff: {
+    description:
+      "Show the diff for a specific file or the whole working tree. " +
+      "Use this to inspect exactly what has changed before committing, or to understand " +
+      "the delta between a commit and the current state. Diffs are truncated at 8 KB. " +
+      "Optionally compare against a specific commit or branch.",
+    parameters: z.object({
+      path: z
+        .string()
+        .optional()
+        .describe("File path (relative or absolute) to diff. Omit to diff the entire working tree."),
+      base: z
+        .string()
+        .optional()
+        .describe("Git ref to diff against (e.g. 'HEAD', 'HEAD~1', 'main'). Defaults to unstaged changes."),
+      staged: z
+        .boolean()
+        .optional()
+        .describe("If true, shows staged (cached) changes instead of unstaged. Defaults to false."),
+      working_dir: z
+        .string()
+        .optional()
+        .describe("Absolute path to the git repository."),
+    }),
+  },
 };

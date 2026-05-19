@@ -1,6 +1,7 @@
 import { getBridgeClient } from "./bridgeClient.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
+import { eventBus } from "#web/eventBus.js";
 
 export async function createRemoteSession(providerName, mode = null) {
   log(colors.dim(
@@ -22,6 +23,7 @@ export async function createRemoteSession(providerName, mode = null) {
         const delay = BASE_DELAY_MS * attempt;
         const reason = is429 ? "429 rate limit" : "503 timeout";
         log(colors.yellow(`  [API Warn] createSession ${reason} (attempt ${attempt}/${MAX_RETRIES}) — waiting ${delay / 1000}s before retry...`));
+        eventBus.emit("rate_limit", { retryAfter: delay / 1000 });
         await new Promise(r => setTimeout(r, delay));
         continue;
       }

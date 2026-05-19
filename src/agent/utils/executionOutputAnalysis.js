@@ -238,6 +238,14 @@ const CLASS_REF_PATTERNS = [
     extractRef:   (m) => m[1],
     context:      () => "constant",
   },
+  {
+    // Go: "undefined: X" or "no required module provides package X"
+    re: /undefined:\s+([\w.\/]+)|no required module provides package\s+([\w.\/]+)/i,
+    language: "go",
+    extractOwner: () => null,
+    extractRef:   (m) => m[1] || m[2],
+    context:      () => "import",
+  },
 ];
 
 /**
@@ -259,6 +267,7 @@ function isRefFormatBug(ref, language) {
     case "node":   return ref.startsWith("./") || ref.startsWith("../");
     case "java":   return !ref.includes(".");
     case "ruby":   return !ref.includes("::");
+    case "go":     return !ref.includes("/");  // bare name = unexported or missing import
     default:       return false;
   }
 }
@@ -287,6 +296,10 @@ const LANG_CAUSES = {
   ruby: {
     formatBug:   "Constant not required — add a `require` statement or check gem load order.",
     realMissing: "Gem not installed or not required — check Gemfile and `require` statements.",
+  },
+  go: {
+    formatBug:   "Identifier not in scope — check that the function/type is exported (starts with capital letter) and the package is imported correctly.",
+    realMissing: "Package not in go.mod — run `go get <package>` then `go mod tidy` to add the dependency.",
   },
 };
 
@@ -338,6 +351,14 @@ const LANG_FIX_HINTS = {
     realMissing: (ref) =>
       `Add the gem to Gemfile and run bundle install.\n` +
       `Then verify: bundle exec ruby -e "require '${ref.replace(/::/g, "/").toLowerCase()}'"`,
+  },
+  go: {
+    formatBug: (ref) =>
+      `Check that ${ref} is exported (capitalize first letter) and the package is imported at the top of the file.`,
+    realMissing: (ref) =>
+      `Add the package: go get ${ref.includes("/") ? ref : "the containing package"}\n` +
+      `Then run: go mod tidy\n` +
+      `Then verify: go build ./... 2>&1`,
   },
 };
 

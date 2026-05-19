@@ -111,15 +111,40 @@ export async function directWriterNode(state, _config) {
 
   let modifiedFiles = [];
 
+  // Emit synthetic tool events so the extension host's diff card generator fires,
+  // giving the user a visible diff card for the document write (same UX as coder writes).
+  const callId = `write_file-${Date.now()}`;
+  const callStartTs = Date.now();
+  eventBus.emit("tool_call_start", {
+    callId,
+    tool: "write_file",
+    paramsSummary: relPath,
+  });
+
   try {
     // Ensure the parent directory exists, then write.
     await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
     await fs.promises.writeFile(absPath, effectiveContent, "utf-8");
     modifiedFiles = [absPath];
     log(colors.green(`  [Graph] -> ✍️  Document written: ${absPath}`));
+    eventBus.emit("tool_call_end", {
+      callId,
+      tool: "write_file",
+      isError: false,
+      result: `Document written: ${relPath}`,
+      elapsed: Date.now() - callStartTs,
+    });
     eventBus.emit("system_message", { text: `✓ Document saved: ${absPath}`, type: "info" });
   } catch (err) {
     log(colors.red(`  [Graph] -> ✍️  Failed to write document: ${err.message}`));
+    eventBus.emit("tool_call_end", {
+      callId,
+      tool: "write_file",
+      isError: true,
+      result: `[ERROR] ${err.message}`,
+      elapsed: Date.now() - callStartTs,
+      errorSummary: err.message.slice(0, 120),
+    });
     eventBus.emit("system_message", {
       text: `✗ Writer failed: ${err.message}`,
       type: "error",

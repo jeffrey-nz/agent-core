@@ -183,7 +183,7 @@ const RAW_PERSONAS = {
     label: "Patch Reviewer",
     icon: "🔬",
     color: "#f59e0b",
-    description: "Reviews implementation diff for dual-rendering, stubs, and missing deletions",
+    description: "Deterministic diff checker: syntax, exports, duplicates, ID consistency",
     phase: "VERIFYING",
   },
 };

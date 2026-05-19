@@ -41,6 +41,11 @@ Review the plan against the intent document and scope document. Check for:
 4. WRONG ORDER: Acceptance test subtask is not last; db:build/sake commands before all file writes; wrong dependency order
 5. VAGUE NOTES: implementation_note fields that say "modify as needed" or similar — must be specific enough to implement without reading any file
 6. FRAMEWORK OVERREACH: Plan introduces TypeScript, React, Vite, or a build toolchain when the user's original request specifies plain .js/.html files or uses CommonJS require(). If the user asked for game.js and test.js with require('./game.js'), the plan must NOT use React/Vite/TypeScript — plain HTML + vanilla JS is the correct deliverable. Fix by replacing the Vite scaffold subtask with direct file creation subtasks for the requested plain files.
+7. WRONG ACCEPTANCE TEST METHODOLOGY (Python/Ruby/Go): If the project type is Python, Ruby, or Go, the acceptance test subtask MUST use execute_bash with the language test runner — NEVER http_request and NEVER a server-start command.
+   - Python: execute_bash with pytest or manage.py check. NOT "flask run", "uvicorn", or http_request.
+   - Ruby: execute_bash with bundle exec rspec or rake test. NOT "rails server" or http_request.
+   - Go: execute_bash with go test ./... or go build ./.... NOT "go run" or http_request.
+   If the last subtask uses http_request or starts a server for these languages, replace it with the correct execute_bash command.
 
 If the plan is acceptable (≤1 minor issues): respond with exactly the text: PLAN_VALID
 
@@ -96,8 +101,9 @@ export async function planValidatorNode(state, config) {
       content: [
         state.intentDocument ? `INTENT DOCUMENT:\n${state.intentDocument}` : "(no intent document)",
         `\nSCOPE DOCUMENT (summary):\n${(state.scopeDocument || "(none)").slice(0, 3000)}`,
+        state.projectType ? `\nPROJECT TYPE: ${state.projectType}` : "",
         `\nEXECUTION PLAN (${state.subtasks.length} subtasks):\n${planSummary}`,
-      ].join("\n\n"),
+      ].filter(Boolean).join("\n\n"),
     },
   ];
 

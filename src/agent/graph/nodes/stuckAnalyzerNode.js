@@ -16,6 +16,10 @@
  *     Uses find_file to locate the real paths and patches the scope document.
  *   - ENVIRONMENT BLOCKS: DNS failures, permission errors, etc. that can't be
  *     fixed by code. Identifies these and revises the verification strategy.
+ *   - COMPILATION ERRORS: TypeScript tsc or PHP syntax errors the coder keeps
+ *     introducing without fixing. Runs the compiler and pinpoints exact fixes.
+ *   - TEST FAILURES: check.js / jest tests that keep failing despite code changes.
+ *     Reads test files and maps each failing assertion to a concrete code fix.
  *   - WRONG APPROACH: The coder's logic was fundamentally incorrect. Reads the
  *     actual code, understands the real structure, and prescribes a different fix.
  *   - INACTION LOOP: The coder kept producing prose instead of tool calls.
@@ -62,7 +66,7 @@ function buildAttemptHistory(messages, maxLen = 3000) {
 
 /**
  * Identifies the dominant failure pattern across all attempts.
- * Returns one of: "phantom_paths" | "env_blocked" | "inaction" | "wrong_logic"
+ * Returns one of: "phantom_paths" | "env_blocked" | "inaction" | "compilation_error" | "test_failure" | "wrong_logic"
  */
 function classifyFailurePattern(messages, lastExecutionErrors) {
   const allContent = messages
@@ -82,6 +86,18 @@ function classifyFailurePattern(messages, lastExecutionErrors) {
   // Inaction — repeated "did not write any files"
   const inactionCount = (allContent.match(/did not write.*file|no files.*modified|write or modify/gi) || []).length;
   if (inactionCount >= 3) return "inaction";
+
+  // Compilation errors — TypeScript tsc, PHP syntax, Python syntax, Ruby syntax, or Go build errors repeating
+  const compilationCount = (allContent.match(
+    /TypeScript compilation errors|tsc.*error|PHP_SYNTAX_ERROR|PHP Parse error|PHP Fatal error|TS\d{4}:|Cannot find name|is not assignable|Property.*does not exist|pre-flight.*TypeScript|PYTHON_SYNTAX_ERROR|SyntaxError:.*line \d|IndentationError:|py_compile.*error|RUBY_SYNTAX_ERROR|SyntaxError.*unexpected|ruby.*-c.*error|go build.*error|build failed.*\.go|undefined:.*\.go|cannot use.*type|undeclared name/gi
+  ) || []).length;
+  if (compilationCount >= 2) return "compilation_error";
+
+  // Test failures — check.js / jest / mocha / rspec / go test repeatedly failing
+  const testFailCount = (allContent.match(
+    /check\.js test results|Failing tests:|tests? passed.*tests? failed|FAIL\s+src\/|● |npm test.*failed|jest.*FAIL|[0-9]+ examples.*[0-9]+ failures|RSpec.*failed|go test.*FAIL|FAIL\t/gi
+  ) || []).length;
+  if (testFailCount >= 2) return "test_failure";
 
   return "wrong_logic";
 }
@@ -106,6 +122,16 @@ export async function stuckAnalyzerNode(state, config) {
   log(colors.dim(`  [Graph] -> 🧠 Failure pattern: ${failurePattern} (after ${retryCount} retries)`));
 
   const attemptHistory = buildAttemptHistory(state.messages);
+
+  const _pt = state.projectType || "";
+  const testRunCommand =
+    _pt === "python"
+      ? `execute_bash ".venv/bin/python -m pytest -v 2>&1 | tail -80" (or python3 -m pytest -v if no venv)`
+      : _pt === "ruby"
+        ? `execute_bash "bundle exec rspec spec/ --format documentation 2>&1 | tail -80" (or bundle exec rake test)`
+        : _pt === "go"
+          ? `execute_bash "go test -v ./... 2>&1 | tail -80"`
+          : `execute_bash "npx jest --no-coverage 2>&1 | tail -80"`;
 
   // Build pattern-specific investigation instructions
   const patternInstructions = {
@@ -144,6 +170,41 @@ INVESTIGATION STEPS:
    Format: "Call write_file on [exact-path] with this exact content: [content]"
    or: "Call patch_file on [exact-path], replacing [exact-old-line] with [exact-new-line]"`,
 
+    compilation_error: `
+FAILURE PATTERN DETECTED: COMPILATION / TYPE ERRORS
+The coder's changes introduced or failed to fix TypeScript, PHP, Python, Ruby, or Go compilation errors.
+
+INVESTIGATION STEPS:
+1. Run the relevant syntax checker to see CURRENT errors:
+   - TypeScript: execute_bash "npx tsc --noEmit 2>&1 | head -60"
+   - PHP: execute_bash "php -l <file>"
+   - Python: execute_bash "python3 -m py_compile <file> 2>&1" (or .venv/bin/python3 for venv projects)
+   - Ruby: execute_bash "ruby -c <file> 2>&1"
+   - Go: execute_bash "go build ./... 2>&1 | head -40"
+2. Read each file mentioned in the compiler output — the errors tell you exactly what is wrong.
+3. For TypeScript: look for missing imports, wrong types, renamed exports, or interface mismatches.
+4. For PHP: look for syntax errors, missing semicolons, unclosed brackets, or wrong string delimiters.
+5. For Python: look for bad indentation, missing colon after if/def/class/for/while, unclosed brackets or strings.
+   Also check: ModuleNotFoundError means pip install is needed (run .venv/bin/pip install -r requirements.txt).
+6. For Ruby: look for missing "end", unclosed strings, wrong method syntax. Rails: check if db:migrate is needed.
+7. For Go: look for undeclared variables, wrong types, missing imports. Run "go mod tidy" if import errors occur.
+8. Do NOT rewrite App.tsx or other large files to stubs — fix the actual type errors.
+9. Verify that your proposed fix would actually eliminate the specific error(s) shown.
+In your REVISED STRATEGY, list each compiler error with its exact fix.`,
+
+    test_failure: `
+FAILURE PATTERN DETECTED: FAILING TESTS
+The implementation is syntactically correct but tests keep failing.
+
+INVESTIGATION STEPS:
+1. Read the test file(s) to understand exactly what behaviour is being asserted.
+2. Read the implementation file(s) — understand the current logic.
+3. Run the tests in verbose mode: ${testRunCommand}
+4. For each failing test: identify the EXACT assertion that fails and why the current code doesn't satisfy it.
+5. Check if the test expectations changed (the test may be testing a NEW contract the implementation doesn't yet meet).
+6. Identify the minimal change that makes ALL failing tests pass without breaking passing tests.
+In your REVISED STRATEGY, map each failing test → the exact code change needed.`,
+
     wrong_logic: `
 FAILURE PATTERN DETECTED: INCORRECT APPROACH
 The coder's approach was logically wrong — files were modified but the fix didn't work.
@@ -164,6 +225,10 @@ INVESTIGATION STEPS:
     ? `\nCURRENT SCOPE DOCUMENT (may contain errors — verify before trusting):\n${scopeDocument.slice(0, 2000)}${scopeDocument.length > 2000 ? "\n...[truncated]" : ""}`
     : "";
 
+  const reflexionSection = state.reflexionContext
+    ? `\n[CROSS-SESSION LESSONS — patterns that failed on this project in prior sessions]\n${state.reflexionContext}\nYour revised strategy MUST NOT repeat these past mistakes.\n`
+    : "";
+
   const systemPrompt = `You are a Senior Strategic Analyst. A subtask has failed after ${retryCount} attempts.
 Your job is NOT to debug one error — it is to understand WHY EVERY ATTEMPT FAILED and produce a fundamentally new strategy.
 
@@ -172,7 +237,7 @@ ${originalTask.slice(0, 800)}
 
 CURRENT SUBTASK:
 ${taskDescription}
-${scopeSection}
+${scopeSection}${reflexionSection}
 HISTORY OF FAILED ATTEMPTS (last ${Math.min(retryCount, 12)} attempts):
 ${attemptHistory}
 ${envNotes}

@@ -11,6 +11,7 @@
  *   Python    — File "/path/file.py", line 123, in fn
  *   .NET/C#   — at Namespace.Class.Method() in /path/file.cs:line 123
  *   Ruby      — /path/file.rb:123:in `method_name'
+ *   Go        — panic: msg / goroutine N ... \t/path/file.go:123
  *   Java      — at com.example.Class.method(File.java:123)
  *   Bash      — line 123: command: message
  */
@@ -205,6 +206,40 @@ function parseRuby(output) {
   return frames.length ? { type, message, frames, root: pickRootFrame(frames) } : null;
 }
 
+// ── Go ────────────────────────────────────────────────────────────────────────
+
+function parseGo(output) {
+  const frames = [];
+  let type = "panic";
+  let message = "";
+
+  // "panic: <message>" or "goroutine N [running]:"
+  const panicRe = /^panic:\s*(.+)/m;
+  const panicMatch = output.match(panicRe);
+  if (panicMatch) {
+    type = "panic";
+    message = panicMatch[1].trim();
+  }
+
+  // Go test failures: "--- FAIL: TestName" with "/path/file_test.go:42"
+  const testFailRe = /^\s+(\S+_test\.go):(\d+):/gm;
+  for (const m of output.matchAll(testFailRe)) {
+    frames.push({ file: m[1], line: parseInt(m[2]), fn: null });
+  }
+
+  // Go panic stack frames: "\t/path/file.go:42 +0x..." or "main.FuncName(...)"
+  //   goroutine N [running]:
+  //   package.FuncName(...)
+  //           /path/to/file.go:42 +0x1c4
+  const goFrameRe = /\t(\/[^:]+\.go):(\d+)/gm;
+  for (const m of output.matchAll(goFrameRe)) {
+    frames.push({ file: m[1], line: parseInt(m[2]), fn: null });
+  }
+
+  if (!frames.length && !panicMatch) return null;
+  return { type, message, frames, root: pickRootFrame(frames) };
+}
+
 // ── Master parser ─────────────────────────────────────────────────────────────
 
 /**
@@ -223,7 +258,8 @@ export function parseStackTrace(output) {
     parseNode(output) ||
     parsePython(output) ||
     parseDotNet(output) ||
-    parseRuby(output);
+    parseRuby(output) ||
+    parseGo(output);
 
   return result || null;
 }

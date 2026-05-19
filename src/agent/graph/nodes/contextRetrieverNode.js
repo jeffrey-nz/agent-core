@@ -28,10 +28,14 @@ export async function contextRetrieverNode({ project }) {
       try {
         const raw = await readFile(path.join(repoPath, "docs", "memory", "reflexion.md"), "utf8");
         const lines = raw.split("\n").filter((l) => l.trim().startsWith("- ["));
-        const recent = lines.slice(-10);
-        return recent.length > 0
-          ? `## Lessons Learned From Past Sessions\n${recent.join("\n")}`
-          : "";
+        const recent = lines.slice(-15);
+        if (recent.length === 0) return "";
+        const failures = recent.filter((l) => !l.includes("] ✓ "));
+        const successes = recent.filter((l) => l.includes("] ✓ "));
+        const sections = [];
+        if (failures.length > 0) sections.push(`### Failure Lessons\n${failures.join("\n")}`);
+        if (successes.length > 0) sections.push(`### First-Pass Successes\n${successes.join("\n")}`);
+        return `## Lessons From Past Sessions\n${sections.join("\n\n")}`;
       } catch {
         return "";
       }

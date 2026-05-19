@@ -39,14 +39,15 @@ async function saveScreenshot(base64, label = "agent") {
 
 // ── Tool: screenshot_url ───────────────────────────────────────────────────
 
-async function screenshotUrl({ url, width = 1280, height = 900, full_page = false, delay_ms = 0 }) {
+async function screenshotUrl({ url, width = 1280, height = 900, full_page = false, delay_ms = 0, dark_mode = false }) {
   const base = apiBase();
   const params = new URLSearchParams({
     url,
     width:    String(width),
     height:   String(height),
     fullPage: String(full_page),
-    ...(delay_ms > 0 ? { delay: String(delay_ms) } : {}),
+    ...(delay_ms > 0  ? { delay:    String(delay_ms) } : {}),
+    ...(dark_mode      ? { darkMode: "true" }          : {}),
   });
 
   let data;
@@ -67,7 +68,7 @@ async function screenshotUrl({ url, width = 1280, height = 900, full_page = fals
     };
   }
 
-  const { screenshotBase64 } = data;
+  const { screenshotBase64, title } = data;
   if (!screenshotBase64) {
     return { ok: false, text: `[screenshot_url] Bridge responded but returned no screenshot data.` };
   }
@@ -75,6 +76,7 @@ async function screenshotUrl({ url, width = 1280, height = 900, full_page = fals
   const savedPath = await saveScreenshot(screenshotBase64, "agent");
   const summary   = [
     `Screenshot of ${url}`,
+    title ? `Page title: "${title}"` : null,
     `Viewport: ${width}×${height}px${full_page ? " (full page)" : ""}`,
     savedPath ? `Saved to: ${savedPath}` : null,
   ].filter(Boolean).join("\n");
@@ -211,6 +213,51 @@ async function startDevServer({ project_dir, command = "npm run dev", port = 517
   };
 }
 
+// ── Tool: list_dev_servers ────────────────────────────────────────────────
+
+async function listDevServers() {
+  const base = apiBase();
+  try {
+    const resp = await fetch(`${base}/api/devserver`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) {
+      return { ok: false, text: `[list_dev_servers] Bridge returned HTTP ${resp.status}` };
+    }
+    const data = await resp.json();
+    if (!data.servers?.length) {
+      return { ok: true, text: "No dev servers currently running." };
+    }
+    const lines = ["Running dev servers:"];
+    data.servers.forEach(s => lines.push(`  pid=${s.pid}  port=${s.port}  url=${s.url}  dir=${s.projectDir}`));
+    return { ok: true, text: lines.join("\n") };
+  } catch (err) {
+    return { ok: false, text: `[list_dev_servers] Bridge unreachable: ${err.message?.slice(0, 120)}` };
+  }
+}
+
+// ── Tool: get_dev_server_logs ─────────────────────────────────────────────
+
+async function getDevServerLogs({ pid, lines = 100 }) {
+  const base = apiBase();
+  try {
+    const resp = await fetch(`${base}/api/devserver/logs/${pid}?lines=${lines}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, text: `[get_dev_server_logs] Bridge returned HTTP ${resp.status}: ${body.slice(0, 200)}` };
+    }
+    const data = await resp.json();
+    return {
+      ok: true,
+      text: `<dev_server_logs pid="${pid}">\n${data.logs || "(no logs)"}\n</dev_server_logs>`,
+    };
+  } catch (err) {
+    return { ok: false, text: `[get_dev_server_logs] Bridge unreachable: ${err.message?.slice(0, 120)}` };
+  }
+}
+
 // ── Tool: stop_dev_server ──────────────────────────────────────────────────
 
 async function stopDevServer({ pid }) {
@@ -226,14 +273,152 @@ async function stopDevServer({ pid }) {
   return { ok: true, text: `Dev server (pid ${pid}) stopped.` };
 }
 
+// ── Tool: click_element ────────────────────────────────────────────────────
+
+async function clickElement({ url, selector, wait_after_ms = 800, session_id }) {
+  const base = apiBase();
+
+  let data;
+  try {
+    const resp = await fetch(`${base}/api/click`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, selector, wait_after_ms, session_id }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, text: `[click_element] Bridge returned HTTP ${resp.status}: ${body.slice(0, 300)}` };
+    }
+    data = await resp.json();
+  } catch (err) {
+    return { ok: false, text: `[click_element] Bridge unreachable: ${err.message?.slice(0, 120)}` };
+  }
+
+  if (!data.clicked) {
+    return {
+      ok: false,
+      text: `[click_element] Could not click "${selector}" on ${url}: ${data.error || "element not found"}\n` +
+            (data.rootHtml ? `DOM snippet:\n${data.rootHtml.slice(0, 400)}` : ""),
+    };
+  }
+
+  const lines = [
+    `<click_element url="${url}" selector="${selector}">`,
+    `  clicked      : yes`,
+  ];
+
+  if (data.errorOverlay) {
+    lines.push(`  error_overlay: ${String(data.errorOverlay).slice(0, 200)}`);
+  }
+  if (data.consoleErrors?.length) {
+    lines.push(`  console_errors:`);
+    data.consoleErrors.slice(0, 5).forEach(e => lines.push(`    - ${String(e).slice(0, 200)}`));
+  }
+  if (data.resultHtml) {
+    lines.push(`  dom_after_click:\n${String(data.resultHtml).slice(0, 600)}`);
+  }
+  lines.push(`</click_element>`);
+
+  return { ok: true, text: lines.join("\n") };
+}
+
+// ── Tool: wait_for_selector ────────────────────────────────────────────────
+
+async function waitForSelector({ url, selector, timeout_ms = 10000, state = "visible", session_id }) {
+  const base = apiBase();
+
+  let data;
+  try {
+    const resp = await fetch(`${base}/api/wait-for`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, selector, timeout_ms, state, session_id }),
+      signal: AbortSignal.timeout(Number(timeout_ms) + 20_000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, text: `[wait_for_selector] Bridge returned HTTP ${resp.status}: ${body.slice(0, 200)}` };
+    }
+    data = await resp.json();
+  } catch (err) {
+    return { ok: false, text: `[wait_for_selector] Bridge unreachable: ${err.message?.slice(0, 120)}` };
+  }
+
+  const statusIcon = data.found ? "✅" : "❌ (timed out)";
+  const lines = [
+    `<wait_for_selector url="${url}">`,
+    `  selector  : ${selector}`,
+    `  state     : ${state}`,
+    `  found     : ${statusIcon}`,
+    `  elapsed   : ${data.elapsed_ms}ms`,
+  ];
+  if (data.text) lines.push(`  text      : ${String(data.text).slice(0, 300)}`);
+  lines.push(`</wait_for_selector>`);
+
+  return { ok: data.found, text: lines.join("\n") };
+}
+
+// ── Tool: evaluate_js ──────────────────────────────────────────────────────
+
+async function evaluateJs({ url, script, session_id }) {
+  const base = apiBase();
+
+  let data;
+  try {
+    const resp = await fetch(`${base}/api/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, script, session_id }),
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, text: `[evaluate_js] Bridge returned HTTP ${resp.status}: ${body.slice(0, 200)}` };
+    }
+    data = await resp.json();
+  } catch (err) {
+    return { ok: false, text: `[evaluate_js] Bridge unreachable: ${err.message?.slice(0, 120)}` };
+  }
+
+  const lines = [`<evaluate_js url="${url}">`];
+
+  if (data.error) {
+    lines.push(`  error  : ${data.error.slice(0, 300)}`);
+  } else {
+    const resultStr = data.result === null
+      ? "null"
+      : typeof data.result === "object"
+        ? JSON.stringify(data.result, null, 2).slice(0, 1000)
+        : String(data.result).slice(0, 500);
+    lines.push(`  result : ${resultStr}`);
+  }
+
+  if (data.logs?.length) {
+    lines.push(`  logs   :`);
+    data.logs.slice(0, 10).forEach(l => {
+      lines.push(`    [${l.type}] ${String(l.text).slice(0, 200)}`);
+    });
+  }
+
+  lines.push(`</evaluate_js>`);
+
+  return { ok: !data.error, text: lines.join("\n") };
+}
+
 // ── Dispatcher ─────────────────────────────────────────────────────────────
 
 export async function executeBrowserTool(name, input, context) {
   switch (name) {
-    case "screenshot_url":    return screenshotUrl(input);
-    case "inspect_page":      return inspectPage(input);
-    case "start_dev_server":  return startDevServer(input, context);
-    case "stop_dev_server":   return stopDevServer(input);
+    case "screenshot_url":      return screenshotUrl(input);
+    case "inspect_page":        return inspectPage(input);
+    case "start_dev_server":    return startDevServer(input, context);
+    case "stop_dev_server":     return stopDevServer(input);
+    case "list_dev_servers":    return listDevServers();
+    case "get_dev_server_logs": return getDevServerLogs(input);
+    case "evaluate_js":         return evaluateJs(input);
+    case "click_element":       return clickElement(input);
+    case "wait_for_selector":   return waitForSelector(input);
     default:
       return { ok: false, text: `[browser] Unknown tool: ${name}` };
   }

@@ -6,7 +6,7 @@ import { colors } from "#app/ui/colors.js";
 
 export async function checkStaticAnalysis(
   projectDir,
-  { phpFiles, tsFiles, jsFiles },
+  { phpFiles, tsFiles, jsFiles, goFiles = [] },
 ) {
   const errors = [];
 
@@ -117,6 +117,34 @@ export async function checkStaticAnalysis(
         }
       }
     } catch { /* non-fatal */ }
+  }
+
+  // Go build + vet: runs when any .go files were modified.
+  // Build check first — catches compilation errors (undefined names, type mismatches,
+  // missing imports). Only run vet if build succeeds; vet output on non-compiling code
+  // mixes build errors and semantic warnings in a confusing way.
+  if (goFiles.length > 0 && (await fileExists(path.join(projectDir, "go.mod")))) {
+    log(colors.dim("  [Verifier] Running go build..."));
+    const buildRes = await execAsync("go build ./... 2>&1", { cwd: projectDir, timeout: 60000 });
+    const buildOut = (buildRes.stdout || buildRes.stderr || "").trim();
+    if (/command not found|No such file/i.test(buildOut)) {
+      log(colors.dim("  [Verifier] go not available — skipping Go build/vet"));
+    } else if (buildRes.status !== 0 && buildOut.length > 0) {
+      errors.push(
+        `Go Build Error:\n${buildOut}\n\n` +
+        `Common causes: undefined variable/function, type mismatch, missing import, wrong package name.\n` +
+        `Run \`go mod tidy\` if you see "no required module provides package" errors.\n` +
+        `Fix all build errors above before this subtask can pass.`,
+      );
+    } else {
+      // Build succeeded — run go vet to catch semantic issues
+      log(colors.dim("  [Verifier] Running go vet..."));
+      const vetRes = await execAsync("go vet ./... 2>&1", { cwd: projectDir, timeout: 30000 });
+      const vetOut = (vetRes.stdout || vetRes.stderr || "").trim();
+      if (vetRes.status !== 0 && vetOut.length > 0 && !/command not found|No such file/i.test(vetOut)) {
+        errors.push(`Go Vet Error:\n${vetOut}\n\nFix all vet issues before this subtask can pass.`);
+      }
+    }
   }
 
   if (

@@ -127,6 +127,29 @@ async function checkComposer(projectDir) {
 }
 
 /**
+ * Check node_modules integrity for Node.js / npm projects.
+ * Mirrors the composer check: ensures the package manager artifacts are present.
+ */
+async function checkNodeModules(projectDir) {
+  try {
+    const { stdout: hasPkg } = await execAsync(`test -f package.json && echo EXISTS || echo MISSING`, { cwd: projectDir });
+    if (hasPkg.includes("MISSING")) return { ok: true, note: "node_modules check skipped (no package.json)" };
+
+    // Confirm node_modules exists and has something in it
+    const { stdout: hasNm } = await execAsync(`test -d node_modules && echo EXISTS || echo MISSING`, { cwd: projectDir });
+    if (hasNm.includes("MISSING")) return { ok: false, note: "node_modules directory not found — run npm install (or yarn/pnpm install)" };
+
+    // Quick sanity: .bin directory should be present if deps installed correctly
+    const { stdout: hasBin } = await execAsync(`test -d node_modules/.bin && echo EXISTS || echo MISSING`, { cwd: projectDir });
+    if (hasBin.includes("MISSING")) return { ok: false, note: "node_modules/.bin missing — dependencies may be incomplete, run npm install" };
+
+    return { ok: true, note: "node_modules present" };
+  } catch {
+    return { ok: true, note: "node_modules check skipped" };
+  }
+}
+
+/**
  * Check for stale SilverStripe compiled config cache in /tmp.
  */
 async function checkSilverStripeCache(projectDir) {
@@ -168,11 +191,29 @@ export async function environmentNode(state) {
     return { environmentChecked: true };
   }
 
-  // Only run for web/PHP projects (SilverStripe, Laravel, WordPress, etc.)
-  // Unity/Swift projects have no HTTP server to probe
-  const webProjectTypes = new Set(["silverstripe", "php", "laravel", "wordpress", "web", "unknown"]);
-  if (state.projectType && !webProjectTypes.has(state.projectType) && state.projectType !== "unknown") {
-    return { environmentChecked: true };
+  // For non-web projects (Python, Ruby, Go, Swift, Unity, Godot), skip the HTTP probe
+  // but still run the git status check — stale uncommitted changes are relevant to all project types.
+  const webProjectTypes = new Set(["silverstripe", "php", "laravel", "wordpress", "web", "node", "nodejs", "react", "nextjs", "unknown"]);
+  const isWebProject = !state.projectType || webProjectTypes.has(state.projectType);
+
+  if (!isWebProject) {
+    // Lightweight git check only — no HTTP probe, no composer/npm checks
+    const projectDir = state.projectDir;
+    if (!projectDir) return { environmentChecked: true };
+    const git = await checkGitStatus(projectDir);
+    const gitNote = git.hasChanges
+      ? `⚠️ Git has uncommitted changes from a prior session: ${git.summary}\n   If these are stale/broken, run: git reset --hard HEAD`
+      : "✓ Git: working tree clean";
+    if (git.hasChanges) {
+      log(colors.yellow(`  [Environment] Uncommitted changes detected`));
+    }
+    return {
+      environmentReport: `## Environment Baseline\n${gitNote}`,
+      environmentHealthy: true,
+      preExistingErrors: [],
+      environmentChecked: true,
+      currentPersona: PERSONA.id,
+    };
   }
 
   log(colors.cyan("  [Graph] -> 🌐 Running Environment Inspector (pre-flight check)..."));
@@ -260,6 +301,17 @@ export async function environmentNode(state) {
     log(colors.yellow(`  [Environment] Composer issue: ${composer.note}`));
   } else {
     findings.push(`✓ Composer: ${composer.note}`);
+  }
+
+  // ── 3b. Node.js node_modules integrity ────────────────────────────────────
+  const nodeModules = await checkNodeModules(projectDir);
+  if (!nodeModules.ok) {
+    preExistingErrors.push(`⚠️ npm: ${nodeModules.note}`);
+    findings.push(`⚠️ npm: ${nodeModules.note}`);
+    environmentHealthy = false;
+    log(colors.yellow(`  [Environment] Node.js issue: ${nodeModules.note}`));
+  } else if (!nodeModules.note.includes("skipped")) {
+    findings.push(`✓ npm: ${nodeModules.note}`);
   }
 
   // ── 4. SilverStripe cache state ───────────────────────────────────────────

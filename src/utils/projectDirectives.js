@@ -22,7 +22,7 @@
  * Returns the project-type constraint block for all AI nodes.
  * Accepts the flags object produced by detectProjectContext().
  */
-export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython }) {
+export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSilverStripe, isGodot, isPython, isRuby, isGo }) {
   if (unity)          return UNITY_CONSTRAINTS;
   if (isSwift)        return SWIFT_CONSTRAINTS;
   if (isGodot)        return GODOT_CONSTRAINTS;
@@ -30,6 +30,8 @@ export function buildConstraints({ unity, isSwift, isCSharp, isPhp, isNode, isSi
   if (isCSharp)       return CSHARP_CONSTRAINTS;
   if (isPhp)          return PHP_CONSTRAINTS;
   if (isNode)         return NODE_CONSTRAINTS;
+  if (isRuby)         return RUBY_CONSTRAINTS;
+  if (isGo)           return GO_CONSTRAINTS;
   if (isPython)       return PYTHON_CONSTRAINTS;
   return UNKNOWN_CONSTRAINTS;
 }
@@ -184,8 +186,10 @@ PROJECT SETUP (MANDATORY for all new Node.js / React / Vite projects — enforce
     start_dev_server()          → starts the server, returns { pid, url }
     screenshot_url(url)         → captures a real browser screenshot so you can SEE the running app
     inspect_page(url)           → checks React mount status, console errors, import failures, DOM snippet
+    get_dev_server_logs(pid)    → fetches recent stdout/stderr from the dev server (build errors, crashes)
     stop_dev_server(pid)        → cleans up the process when done
-  After writing files for a web app, always call start_dev_server → screenshot_url → inspect_page to verify the result visually. If inspect_page shows errorOverlay or consoleErrors, fix the issue before reporting the subtask complete.`;
+  After writing files for a web app, always call start_dev_server → screenshot_url → inspect_page to verify the result visually. If inspect_page shows errorOverlay or consoleErrors, fix the issue before reporting the subtask complete.
+  If start_dev_server fails or the page is blank: call get_dev_server_logs(pid) to see the build error, fix it, then stop_dev_server + start_dev_server again.`;
 
 const PYTHON_CONSTRAINTS = `[PROJECT TYPE: Python]
 - Dependency management: pip / poetry / pipenv (check for requirements.txt, pyproject.toml, or Pipfile)
@@ -227,6 +231,54 @@ PYTHON SYNTAX RULES:
 __pycache__ CLEANUP:
 - After test runs: execute_bash("find . -name '__pycache__' -exec rm -rf {} + 2>/dev/null; echo done") only if the working directory is cluttered`;
 
+const RUBY_CONSTRAINTS = `[PROJECT TYPE: Ruby]
+- Dependency management: Bundler (Gemfile / Gemfile.lock)
+- Tests: RSpec (spec/ dir) or Minitest (test/ dir)
+- Linting: RuboCop (if .rubocop.yml present)
+
+ENVIRONMENT SETUP:
+- ALWAYS use bundle exec prefix for all commands: bundle exec rspec, bundle exec rake, bundle exec rails
+- After ANY change to Gemfile: bundle exec bundle install  (or just: bundle install)
+- Run tests: bundle exec rspec spec/ or bundle exec rake test
+- NEVER use system ruby directly — always use bundler to ensure the correct gem versions
+
+RAILS-SPECIFIC RULES (when app/ or config/routes.rb is present):
+- After ANY change to db/schema or new migration file: bundle exec rails db:migrate
+- NEVER run "rails server" or "bundle exec rails s" from execute_bash — it blocks forever. Verify routes by reading app/controllers/ and config/routes.rb instead.
+- After updating Rails routes: bundle exec rails routes 2>&1 | head -40 to confirm the new route is registered
+- Strong parameters must be declared in the controller — never mass-assign without permit()
+- After changing initializers or environment config: restart would be needed in production (note it but do not try to restart the server)
+
+TESTING:
+- RSpec: bundle exec rspec spec/ --format documentation 2>&1 | tail -40
+- Minitest: bundle exec rake test 2>&1 | tail -40
+- Coverage (SimpleCov): check spec/spec_helper.rb or test/test_helper.rb for coverage config`;
+
+const GO_CONSTRAINTS = `[PROJECT TYPE: Go]
+- Module management: go mod (go.mod / go.sum)
+- Tests: go test ./...
+- Build: go build ./...
+- Linting: golangci-lint (if .golangci.yml present) or go vet ./...
+
+MODULE MANAGEMENT (CRITICAL):
+- After adding a new import to any .go file, run: go mod tidy (updates go.mod + go.sum)
+- NEVER manually edit go.mod or go.sum — always use go mod tidy or go get
+- Build verification: execute_bash("go build ./... 2>&1") — exit 0 with no output = clean build
+- NEVER run a long-running server (go run cmd/server/main.go) from execute_bash — it blocks forever. Verify HTTP handlers by reading the source code and confirming route/handler logic.
+
+GO IDIOMS — avoid these common mistakes:
+- Error handling: ALWAYS check err != nil after every function that returns (value, error). Ignoring errors is NEVER acceptable.
+- Goroutine leaks: any goroutine started with go func() must have a clear exit path (done channel or context cancellation)
+- Nil pointer: check pointer != nil before dereferencing; zero value for a pointer is nil, not an empty struct
+- Defer ordering: defer runs LIFO — defer file.Close() immediately after opening, before any error checks that skip Close
+- Interface satisfaction: if a type is intended to implement an interface, add "var _ MyInterface = (*MyType)(nil)" to detect mismatches at compile time
+
+TESTING:
+- Run all tests: execute_bash("go test ./... 2>&1")
+- Run with verbose output: execute_bash("go test -v ./... 2>&1 | tail -60")
+- Run specific package: execute_bash("go test ./pkg/mypackage/... -v 2>&1")
+- Benchmarks: execute_bash("go test -bench=. ./... 2>&1")`;
+
 const UNKNOWN_CONSTRAINTS = `[PROJECT TYPE: Unknown — explore the project structure before making assumptions about tooling or conventions]`;
 
 const SWIFT_CONSTRAINTS = `[PROJECT TYPE: Swift / Xcode]
@@ -254,6 +306,8 @@ export function buildResearchDirective(projectType) {
   if (projectType === "swift")        return SWIFT_RESEARCH_DIRECTIVE;
   if (projectType === "godot")        return GODOT_RESEARCH_DIRECTIVE;
   if (projectType === "python")       return PYTHON_RESEARCH_DIRECTIVE;
+  if (projectType === "ruby")         return RUBY_RESEARCH_DIRECTIVE;
+  if (projectType === "go")           return GO_RESEARCH_DIRECTIVE;
   return "";
 }
 
@@ -507,9 +561,13 @@ PYTHON PROJECT DETECTED. During your research you MUST specifically investigate:
    - execute_bash("find . -name 'test_*.py' -o -name '*_test.py' | grep -v .venv | head -20")
    - Check for pytest.ini, setup.cfg [tool:pytest], or pyproject.toml [tool.pytest.ini_options]
    - execute_bash("pytest --collect-only -q 2>&1 | tail -5") to count existing tests (if pytest installed)
-4. Check virtualenv status:
+   - execute_bash(".venv/bin/python -m pytest -q 2>&1 | tail -10") to confirm baseline test status before changes
+     If tests fail, note them in KEY FINDINGS SUMMARY as "PRE-EXISTING TEST FAILURES: ..." so the coder knows about them.
+4. Check virtualenv status and installed packages:
    - execute_bash("ls .venv/bin/python 2>/dev/null || ls venv/bin/python 2>/dev/null || echo NO_VENV")
-   - If no virtualenv: note it — the coder will need to create one before running tests
+   - If virtualenv exists: execute_bash(".venv/bin/pip list --format=columns 2>/dev/null | head -40")
+     Include the installed package list in KEY FINDINGS so the coder knows what is already available.
+   - If no virtualenv: note it — the coder will need to create one before running tests or installing packages
 5. For Django tasks — check existing models, views, and URL patterns relevant to the task:
    - execute_bash("find . -name 'models.py' | grep -v .venv | head -10")
    - execute_bash("find . -name 'urls.py' | grep -v .venv | head -10")
@@ -538,6 +596,49 @@ ALREADY-IMPLEMENTED CHECK (prevents duplicate work):
 - Before generating subtasks to add cards/enemies/relics/events, always check the data JSON files first.
 - If any requested feature already exists: include in KEY FINDINGS SUMMARY: "⚠️ ALREADY PRESENT: [feature] in [file]. Only add what is genuinely missing."`;
 
+const RUBY_RESEARCH_DIRECTIVE = `
+
+RUBY PROJECT DETECTED. During your research you MUST specifically investigate:
+1. Identify the Ruby version and whether this is a Rails project:
+   - execute_bash("cat .ruby-version 2>/dev/null || ruby --version 2>/dev/null | head -1")
+   - Check for app/ and config/routes.rb to confirm Rails presence
+   - If Rails: execute_bash("bundle exec rails --version 2>&1") and read config/application.rb for the app name
+2. Check Bundler dependencies:
+   - execute_bash("bundle list --without development test 2>&1 | head -40") — shows production gems
+   - Check Gemfile for notable gems (database adapter, auth libraries, background jobs, etc.)
+3. Identify the test framework:
+   - Check for spec/ (RSpec) or test/ (Minitest/Test::Unit)
+   - For RSpec: execute_bash("bundle exec rspec --version 2>&1") and check spec/spec_helper.rb
+   - execute_bash("find spec -name '*_spec.rb' | head -20 2>/dev/null || find test -name '*_test.rb' | head -20 2>/dev/null")
+4. For Rails projects — check schema and existing models/controllers relevant to the task:
+   - execute_bash("cat db/schema.rb 2>/dev/null | head -80")
+   - execute_bash("find app/models -name '*.rb' | head -20")
+   - execute_bash("bundle exec rails routes 2>&1 | grep -v '^$' | head -40")
+5. ALREADY-IMPLEMENTED CHECK: grep for the key method/class name — if found, note it in KEY FINDINGS.`;
+
+const GO_RESEARCH_DIRECTIVE = `
+
+GO PROJECT DETECTED. During your research you MUST specifically investigate:
+1. Identify the Go version and module name:
+   - execute_bash("go version 2>&1")
+   - execute_bash("head -5 go.mod")
+   - Note the module path (first line of go.mod) — all internal imports use this prefix
+2. Map the package structure:
+   - execute_bash("find . -name '*.go' -not -path '*/vendor/*' | head -40")
+   - Identify main packages (contain "package main") vs library packages
+   - execute_bash("grep -r 'package main' --include='*.go' -l 2>/dev/null | head -10")
+3. Check existing tests:
+   - execute_bash("find . -name '*_test.go' -not -path '*/vendor/*' | head -20")
+   - execute_bash("go test ./... 2>&1 | tail -20") — confirm baseline test status
+4. Check for key interfaces and types in packages relevant to the task:
+   - Read the main .go files in the affected package(s)
+   - Note exported function signatures — Go callers depend on these exactly
+5. Check build and vet health:
+   - execute_bash("go build ./... 2>&1") — confirm no compilation errors before changes
+   - execute_bash("go vet ./... 2>&1") — confirm no vet warnings before changes
+     If vet warnings exist, note them in KEY FINDINGS SUMMARY as "PRE-EXISTING VET WARNINGS: ..." so the coder doesn't mistake them for regressions.
+6. ALREADY-IMPLEMENTED CHECK: grep for the key function/type name — if found, note it in KEY FINDINGS.`;
+
 // ---------------------------------------------------------------------------
 // TDD directive — injected into planner and project manager system prompts
 // ---------------------------------------------------------------------------
@@ -551,6 +652,8 @@ export function buildTddDirective(projectType) {
   if (projectType === "swift")  return SWIFT_TDD_DIRECTIVE;
   if (projectType === "godot")  return GODOT_TDD_DIRECTIVE;
   if (projectType === "python") return PYTHON_TDD_DIRECTIVE;
+  if (projectType === "ruby")   return RUBY_TDD_DIRECTIVE;
+  if (projectType === "go")     return GO_TDD_DIRECTIVE;
   if (projectType === "node" || projectType === "unknown") return NODE_TDD_DIRECTIVE;
   return GENERIC_TDD_DIRECTIVE;
 }
@@ -589,6 +692,33 @@ DJANGO-SPECIFIC: For Django apps, prefer django.test.TestCase (subclass of unitt
 
 COVERAGE TARGET: If pytest-cov is installed, the plan should include a final "run tests with coverage" subtask: pytest --cov=. --cov-report=term-missing`;
 
+const RUBY_TDD_DIRECTIVE = `This is a Ruby project. Apply TDD where natural — use RSpec (spec/) or Minitest (test/) depending on which is present.
+
+RSPEC RULES:
+- Spec files: spec/**/*_spec.rb
+- Run all: bundle exec rspec spec/ --format documentation 2>&1 | tail -40
+- Run one: bundle exec rspec spec/models/user_spec.rb 2>&1
+- Each subtask adding a model, service, or controller should have a corresponding spec file
+
+ANTI-STUB RULE: When implementing logic, produce a REAL implementation — NOT a method that returns nil or raises NotImplementedError. A passing test against a stub is a false pass.
+
+RAILS-SPECIFIC: For Rails projects, use FactoryBot or fixtures for test data, not raw ActiveRecord.create in every test. Controller tests: prefer request specs (spec/requests/) over controller specs. Model validations: test both valid and invalid cases.`;
+
+const GO_TDD_DIRECTIVE = `This is a Go project. Apply TDD where natural — Go's built-in test framework is the standard.
+
+GO TEST RULES:
+- Test files: *_test.go in the same package directory as the code under test
+- Test functions: func TestFunctionName(t *testing.T) — must start with Test
+- Table-driven tests preferred: use []struct{name, input, expected} pattern
+- Run all: execute_bash("go test ./... 2>&1 | tail -30")
+- Run specific: execute_bash("go test ./pkg/mypackage/... -v -run TestMyFunction 2>&1")
+
+ANTI-STUB RULE: When implementing a function, produce a REAL implementation — NOT a function that returns nil, 0, or an empty value without any logic. A passing test against a stub is a false pass.
+
+BENCHMARK TESTS: Add func BenchmarkX(b *testing.B) only if the task explicitly requires performance measurements.`;
+
+
+
 
 
 // ---------------------------------------------------------------------------
@@ -615,7 +745,10 @@ export function buildCoderDirective(projectType) {
     projectType === "unity"        ? UNITY_CODER_DIRECTIVE :
     projectType === "swift"        ? SWIFT_CODER_DIRECTIVE :
     projectType === "godot"        ? GODOT_CODER_DIRECTIVE :
-    projectType === "python"       ? PYTHON_CODER_DIRECTIVE : "";
+    projectType === "python"       ? PYTHON_CODER_DIRECTIVE :
+    projectType === "ruby"         ? RUBY_CODER_DIRECTIVE :
+    projectType === "go"           ? GO_CODER_DIRECTIVE :
+    projectType === "csharp"       ? CSHARP_CODER_DIRECTIVE : "";
   return GENERAL_CODER_DIRECTIVE + frameworkDirective;
 }
 
@@ -688,6 +821,22 @@ REACT / WEB UI QUALITY STANDARDS (apply to all React, Vue, and web app tasks):
   If inspect_page reports errorOverlay or consoleErrors: fix the issue and re-verify before reporting complete.
   If the screenshot shows a blank white page or only a loading spinner: call inspect_page to diagnose the root cause.
   NEVER run "npm run dev" via execute_bash — it blocks forever. Use start_dev_server instead.
+  For interactive verification (clicks, form submission, navigation):
+    5. click_element(url, selector)      — clicks a CSS selector, returns DOM state after click
+    6. wait_for_selector(url, selector)  — waits up to 10s for a selector to appear/disappear
+    7. evaluate_js(url, script)          — runs arbitrary JS in the page, returns the result
+    8. get_dev_server_logs(pid)          — fetches recent stdout/stderr from the dev server (useful if it crashed or shows build errors)
+    9. list_dev_servers()               — lists all currently running dev servers with their PIDs and ports
+  Flow example: start_dev_server → screenshot (see state) → click_element (tab/button) → screenshot (verify result)
+  If the dev server crashes or shows a blank page: call get_dev_server_logs(pid) to see the build/runtime error output.
+
+READ-ONLY MODE (Research / Scoping phases):
+If a write_file, patch_file, or delete_file call returns an error beginning with "[READ-ONLY]", you are in an investigation or scoping phase where file changes are blocked.
+DO NOT retry the write. Instead:
+  1. Document the exact change you would make (file path + a short diff or pseudocode block).
+  2. Add it to your report/plan so the execution phase can apply it.
+  3. Continue analysing — read-only tools (read_file, execute_bash, search) are still available.
+  The execution phase will apply all the changes from your plan once you hand off.
 `;
 
 const SILVERSTRIPE_CODER_DIRECTIVE = `
@@ -867,6 +1016,93 @@ const PYTHON_CODER_DIRECTIVE = `
 
 - __PYCACHE__ NOISE: Ignore __pycache__ directories and .pyc files — they are auto-generated and not part of the deliverable. Do NOT write or modify them.`;
 
+const RUBY_CODER_DIRECTIVE = `
+- BUNDLER FIRST: Before running any Ruby command, check that dependencies are installed:
+    execute_bash("bundle check 2>&1 || bundle install 2>&1 | tail -20")
+  After modifying Gemfile: always run bundle install before proceeding.
+
+- NEVER RUN BLOCKING SERVERS: NEVER use execute_bash to run "rails server", "rails s",
+  "bundle exec rails s", or "puma" — they block forever. Verify routes and controllers
+  by reading the source code. Use http_request only if the server is already running externally.
+
+- RAILS MIGRATIONS: After ANY change to app/models/*.rb (new field, new model, changed type):
+    execute_bash("bundle exec rails db:migrate 2>&1")
+  A missing migration causes ActiveRecord::StatementInvalid at runtime.
+
+- TEST RUNNER: Run RSpec tests after implementing each subtask:
+    execute_bash("bundle exec rspec spec/ --format progress 2>&1 | tail -20")
+  Run Minitest: execute_bash("bundle exec rake test 2>&1 | tail -20")
+  ALL tests must pass before reporting the subtask complete.
+
+- STRONG PARAMETERS: In Rails controllers, always use params.require(:model).permit(:field1, :field2)
+  before mass-assignment. Never use params.permit! (whitelists everything, security risk).`;
+
+const GO_CODER_DIRECTIVE = `
+- BUILD CHECK FIRST: Before making changes, confirm the module compiles:
+    execute_bash("go build ./... 2>&1")
+  Note any pre-existing errors. After writing new code, re-run to confirm it compiles.
+
+- MODULE TIDY: After adding any new import to a .go file:
+    execute_bash("go mod tidy 2>&1")
+  This updates go.mod and go.sum. A missing go mod tidy causes "no required module provides package" errors.
+
+- NEVER RUN BLOCKING SERVERS: NEVER use execute_bash to run "go run" if the program starts
+  an HTTP listener (net/http.ListenAndServe, grpc.Serve, etc.) — it blocks forever.
+  Verify handler logic by reading the source. Run tests instead of starting the server.
+
+- ERROR HANDLING: ALWAYS check the error return from every function call that returns an error:
+    WRONG: result, _ := SomeFunc()
+    RIGHT: result, err := SomeFunc(); if err != nil { return fmt.Errorf("context: %w", err) }
+  Ignoring errors with _ is only acceptable for Write/Close on best-effort cleanup paths.
+
+- TEST RUNNER: After implementing each subtask, run:
+    execute_bash("go test ./... 2>&1 | tail -30")
+  All tests must pass. If a new package has no tests yet, add at least one.
+
+- FMT: Go source must be gofmt-formatted. After writing a new .go file:
+    execute_bash("gofmt -w <filename> 2>&1")
+
+- VET: After the build passes, run go vet to catch semantic bugs that compile but fail at runtime:
+    execute_bash("go vet ./... 2>&1")
+  Common vet findings: wrong Printf format verbs (e.g. %d for a string), mutex copying by value,
+  unreachable code. Fix ALL vet warnings — they are real bugs, not style issues.`;
+
+const CSHARP_CODER_DIRECTIVE = `
+- BUILD BEFORE EDIT: Before making changes, confirm the project compiles cleanly:
+    execute_bash("dotnet build --no-restore 2>&1 | tail -20")
+  Note any pre-existing errors so you don't mistake them for regressions later.
+
+- NUGET DISCOVERY: Before adding a NuGet dependency, confirm it isn't already referenced:
+    execute_bash("dotnet list package 2>&1")
+  To add a package: execute_bash("dotnet add package <PackageName> 2>&1")
+  Never manually edit .csproj <PackageReference> lines for new packages.
+
+- NAMESPACES: Match the namespace of each new file to the folder hierarchy and project name.
+  Pattern: <ProjectRootNamespace>.<SubfolderPath>. Read a nearby .cs file to confirm the convention.
+
+- ASYNC/AWAIT HYGIENE:
+  1. Async methods MUST return Task or Task<T> — not void (except event handlers).
+  2. Never call .Result or .Wait() on a Task — always await. Sync-over-async deadlocks on ASP.NET.
+  3. If an async method returns a value, await it: var result = await SomeMethodAsync();
+
+- OBJ / BIN CACHE: If you encounter mysterious type-not-found or duplicate-symbol errors after
+  renaming classes or moving files, clear the compiled artifacts and rebuild:
+    execute_bash("find . \\( -name 'obj' -o -name 'bin' \\) -exec rm -rf {} + 2>/dev/null; dotnet build 2>&1 | tail -20")
+
+- TEST SUITE: After implementing any feature, run the test project(s):
+    execute_bash("dotnet test --no-build 2>&1 | tail -30")
+  All tests must pass before reporting a subtask complete. If tests fail: read the failure output,
+  fix the issue, re-run dotnet build && dotnet test.
+
+- ENTITY FRAMEWORK MIGRATIONS: After changing a DbContext-derived class or any entity model:
+    execute_bash("dotnet ef migrations add <MigrationName> 2>&1")
+    execute_bash("dotnet ef database update 2>&1")
+  A model change without a migration will cause runtime errors on first DbContext use.
+
+- NULL SAFETY: Enable nullable reference types (#nullable enable or in .csproj). Treat all
+  compiler nullable warnings as errors during development — they prevent NullReferenceException
+  in production. Use null-conditional operators (?.) and null-coalescing (??) over explicit null checks.`;
+
 
 // ---------------------------------------------------------------------------
 // Acceptance test directive — injected into the coder system prompt
@@ -922,6 +1158,9 @@ export function buildPlannerVerificationDirective(projectType) {
   if (projectType === "swift")        return SWIFT_PLANNER_VERIFICATION;
   if (projectType === "unity")        return UNITY_PLANNER_VERIFICATION;
   if (projectType === "godot")        return GODOT_PLANNER_VERIFICATION;
+  if (projectType === "ruby")         return RUBY_PLANNER_VERIFICATION;
+  if (projectType === "go")           return GO_PLANNER_VERIFICATION;
+  if (projectType === "python")       return PYTHON_PLANNER_VERIFICATION;
   return "";
 }
 
@@ -997,6 +1236,52 @@ CRITICAL: The verifier independently detects four additional issues via static a
 3. NotificationCenter.addObserver closure accessing @MainActor viewModel directly (Swift 6 error)
 4. @Observable class referenced via @StateObject or @ObservedObject in any consuming view — always rejected
 There is no way to "pass" acceptance without fixing ALL of these — the planner MUST schedule fix subtasks for each one found in research.`;
+
+const RUBY_PLANNER_VERIFICATION = `
+For Ruby / Rails projects the LAST subtask MUST be an acceptance test using execute_bash evidence — NOT http_request (the Rails server blocks forever):
+- The ONLY acceptable acceptance test methods are:
+  1. RSpec: execute_bash("bundle exec rspec spec/ --format documentation 2>&1 | tail -40") — exit 0, 0 failures
+  2. Minitest: execute_bash("bundle exec rake test 2>&1 | tail -30") — exit 0, 0 failures
+  3. Route check: execute_bash("bundle exec rails routes 2>&1 | grep <route>") — confirms route registered
+  4. Schema check: execute_bash("bundle exec rails db:migrate:status 2>&1 | grep up") — confirms migrations applied
+- Set "files": [] (verification only — no writes)
+- The acceptanceCriteria MUST describe what the execute_bash output should contain (e.g. "N examples, 0 failures").
+- NEVER write http_request or any URL in a Ruby acceptance test.
+
+Example:
+  task: "ACCEPTANCE TEST: Verify all RSpec tests pass after adding new feature"
+  acceptanceCriteria: "bundle exec rspec spec/ exits 0 AND output shows N examples, 0 failures."
+  failureCriteria: "Any failure lines in RSpec output or non-zero exit code."`;
+
+const GO_PLANNER_VERIFICATION = `
+For Go projects the LAST subtask MUST be an acceptance test using execute_bash evidence — NOT http_request (go run blocks forever):
+- The ONLY acceptable acceptance test methods are:
+  1. Tests: execute_bash("go test ./... 2>&1 | tail -30") — exit 0, all packages "ok"
+  2. Build: execute_bash("go build ./... 2>&1") — exit 0, no errors
+  3. Vet: execute_bash("go vet ./... 2>&1") — exit 0, no warnings
+- Set "files": [] (verification only — no writes)
+- The acceptanceCriteria MUST describe what the execute_bash output should contain.
+- NEVER write http_request, "go run", or any URL in a Go acceptance test.
+
+Example:
+  task: "ACCEPTANCE TEST: Verify Go tests pass and build is clean"
+  acceptanceCriteria: "go test ./... exits 0 with all 'ok' lines, go build ./... exits 0."
+  failureCriteria: "Any FAIL line or non-zero exit code from go test or go build."`;
+
+const PYTHON_PLANNER_VERIFICATION = `
+For Python projects the LAST subtask MUST be an acceptance test using execute_bash evidence — NOT http_request (running the server blocks forever):
+- The ONLY acceptable acceptance test methods are:
+  1. pytest: execute_bash("python3 -m pytest --tb=short -q 2>&1 | tail -40") — or ".venv/bin/python -m pytest" if .venv/ exists. Exit 0, 0 failures.
+  2. Django check: execute_bash(".venv/bin/python manage.py check 2>&1") — confirms no system check errors
+  3. Import check: execute_bash("python3 -c 'import mymodule' 2>&1") — confirms module importable
+- Set "files": [] (verification only — no writes)
+- The acceptanceCriteria MUST describe what the execute_bash output should contain (e.g. "N passed, 0 failed").
+- NEVER write http_request, "flask run", "uvicorn", or "manage.py runserver" in a Python acceptance test — these block forever.
+
+Example:
+  task: "ACCEPTANCE TEST: Verify pytest test suite passes after feature implementation"
+  acceptanceCriteria: "python3 -m pytest exits 0 AND output shows N passed, 0 failed, 0 errors."
+  failureCriteria: "Any failed or error lines in pytest output or non-zero exit code."`;
 
 // ---------------------------------------------------------------------------
 // Build command detection — used by format.js and verifierNode.js

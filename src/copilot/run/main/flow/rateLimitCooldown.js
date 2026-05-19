@@ -47,6 +47,7 @@ export async function rateLimitCooldown(reason, rl) {
 
   // Notify the UI so the user sees the wait instead of a frozen spinner
   eventBus.emit("phase_change", { phase: "DEBUGGING", label: "Rate limit — waiting…" });
+  eventBus.emit("rate_limit", { retryAfter: TOTAL_SECS });
   eventBus.emit("system_message", {
     text: `⏳ Rate limit reached — waiting 60 minutes before retry. Reason: ${reason || "provider limit"}`,
     type: "warning",

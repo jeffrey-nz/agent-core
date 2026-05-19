@@ -73,10 +73,22 @@ Examples:
 - "fix the phpunit failure" → last subtask: "Run phpunit and confirm all tests pass"
 - "fix the composer dependency error" → last subtask: "Run composer install and confirm it resolves without conflicts"`;
 
+  // Build optional context blocks to give the planner richer signal.
+  // Intent document: explicit success criteria and constraints from intentNode.
+  // Reflexion context: failure patterns and successes from prior sessions on this project.
+  const intentBlock = state.intentDocument
+    ? [{ role: "user", content: `[INTENT ANALYSIS — use success_criteria and key_constraints to drive subtask design]\n${state.intentDocument}` }]
+    : [];
+  const reflexionBlock = state.reflexionContext
+    ? [{ role: "user", content: `[LESSONS FROM PRIOR SESSIONS ON THIS PROJECT — avoid these failure patterns when designing the plan]\n${state.reflexionContext}` }]
+    : [];
+
   /** @type {import('ai').ModelMessage[]} */
   const planningMessages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: `ORIGINAL TASK:\n${state.messages[0].content}` },
+    ...intentBlock,
+    ...reflexionBlock,
     { role: "user", content: `RESEARCH REPORT:\n${state.researchContext}` },
   ];
 
@@ -115,12 +127,12 @@ Examples:
       throw new Error("Could not locate JSON brackets in output.");
     }
   } catch (e) {
-    log(
-      colors.yellow(
-        "  [Graph] -> Warning: Planner did not output clean JSON. Operating as single task.",
-      ),
-    );
-    subtasks = [{ id: 1, task: "Complete the entire plan", files: [], constraints: "" }];
+    log(colors.yellow(`  [Graph] -> Warning: Planner JSON parse failed (${e.message?.slice(0, 80)}). Falling back to single task.`));
+    eventBus.emit("system_message", { type: "warning", text: "⚠ Planner output was not valid JSON — running as a single consolidated task." });
+    // Try to extract a meaningful task from the first non-empty line of the plan text
+    const fallbackTask = planText.split('\n').map(l => l.trim()).find(l => l.length > 10 && !l.startsWith('{') && !l.startsWith('```'))
+      || "Complete the entire plan";
+    subtasks = [{ id: 1, task: fallbackTask, files: [], constraints: "" }];
   }
 
   // Normalize all subtasks to the enriched schema with defaults for missing fields.

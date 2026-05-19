@@ -217,6 +217,15 @@ export async function handleWriteFile(input, { rootDir, state, allowedDirs = [] 
   if (typeof input.content !== "string") {
     return `[ERROR writing ${input.path || "unknown"}]\nValidation Error: write_file requires a 'content' parameter containing the file text.`;
   }
+  // Binary content guard: reject writes that contain null bytes or dense control characters
+  // (indicates the AI is trying to write binary data as text, which would corrupt the file).
+  if (/\x00/.test(input.content)) {
+    return (
+      `[ERROR writing ${input.path || "unknown"}]\n` +
+      `Binary content detected (null bytes present). write_file only supports text files.\n` +
+      `If you need to write binary data, encode it as base64 and use execute_bash with base64 decode.`
+    );
+  }
   if (input.content.trim().length === 0) {
     return (
       `[ERROR writing ${input.path || "unknown"}]\n` +

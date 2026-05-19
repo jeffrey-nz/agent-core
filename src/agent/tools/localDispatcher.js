@@ -46,7 +46,7 @@ const PHP_TOOLS = new Set([
 
 const DIAGNOSTICS_TOOLS = new Set(["get_workspace_diagnostics"]);
 
-const GIT_TOOLS = new Set(["git_inspect", "git_commit", "git_push", "git_branch"]);
+const GIT_TOOLS = new Set(["git_inspect", "git_commit", "git_push", "git_branch", "git_diff"]);
 
 const GITHUB_TOOLS = new Set([
   "github_create_issue",
@@ -64,6 +64,11 @@ const BROWSER_TOOLS = new Set([
   "inspect_page",
   "start_dev_server",
   "stop_dev_server",
+  "list_dev_servers",
+  "get_dev_server_logs",
+  "evaluate_js",
+  "click_element",
+  "wait_for_selector",
 ]);
 
 // Tools that mutate state - blocked when context.readOnly is true.
@@ -79,6 +84,16 @@ const WRITE_TOOLS = new Set([
 
 import { withRetry } from "./retryWrapper.js";
 import { validateToolResult } from "./validation.js";
+
+/** Extract a short one-line summary from a multi-line error string. */
+function _extractErrorSummary(text) {
+  if (!text) return "";
+  // Strip leading "[ERROR...]" tag prefix
+  const stripped = String(text).replace(/^\[ERROR[^\]]*\]\s*/i, "").trim();
+  // Take first non-empty line up to 120 chars
+  const firstLine = stripped.split("\n").map(l => l.trim()).find(l => l.length > 0) || stripped;
+  return firstLine.slice(0, 120);
+}
 
 export async function dispatchTool(name, args, context) {
   // Enforce read-only mode - any mutation attempt is rejected here so the AI
@@ -106,6 +121,13 @@ export async function dispatchTool(name, args, context) {
     }
   }
 
+  // Guard: filesystem and search tools require a valid rootDir
+  if ((FILESYSTEM_TOOLS.has(name) || SEARCH_TOOLS.has(name)) && !context?.rootDir) {
+    const msg = `[ERROR] Tool "${name}" requires a rootDir but none was provided in the execution context.`;
+    console.error(`[Dispatcher] Missing rootDir for ${SEARCH_TOOLS.has(name) ? "search" : "filesystem"} tool: ${name}`);
+    return { ok: false, error: msg, text: msg };
+  }
+
   // Determine which executor to use
   let executor;
   if (FILESYSTEM_TOOLS.has(name)) {
@@ -131,7 +153,16 @@ export async function dispatchTool(name, args, context) {
   } else if (BROWSER_TOOLS.has(name)) {
     executor = () => executeBrowserTool(name, args, context);
   } else {
-    return { ok: false, error: `Unknown tool: ${name}`, text: `[ERROR] Unknown tool: ${name}` };
+    // Suggest similar tool names to help the AI recover from typos
+    const all = [
+      ...FILESYSTEM_TOOLS, ...SEARCH_TOOLS, ...SHELL_TOOLS, ...DATABASE_TOOLS,
+      ...HTTP_TOOLS, ...PHP_TOOLS, ...DIAGNOSTICS_TOOLS, ...GIT_TOOLS,
+      ...GITHUB_TOOLS, ...MEMORY_TOOLS, ...BROWSER_TOOLS,
+    ];
+    const similar = all.filter(t => t.includes(name.split("_")[0]) || name.includes(t.split("_")[0])).slice(0, 3);
+    const hint = similar.length ? ` Did you mean: ${similar.join(", ")}?` : "";
+    const msg = `[ERROR] Unknown tool: "${name}".${hint}`;
+    return { ok: false, error: msg, text: msg };
   }
 
   // Wrap executor with retry logic for transient failures
@@ -146,8 +177,13 @@ export async function dispatchTool(name, args, context) {
     result = {
       ok: !isError,
       text: result,
-      ...(isError ? { error: result.trim() } : {}),
+      ...(isError ? { error: result.trim(), errorSummary: _extractErrorSummary(result) } : {}),
     };
+  }
+
+  // Attach errorSummary to structured error results that don't already have one
+  if (result && !result.ok && result.error && !result.errorSummary) {
+    result.errorSummary = _extractErrorSummary(result.error);
   }
 
   // Validate the result against expected schema

@@ -186,6 +186,12 @@ export async function debuggerNode(state, config) {
       }\n`
     : "";
 
+  // Cross-session lessons from reflexion.md — injected so the debugger can
+  // prioritise known recurring patterns when classifying the failure mode.
+  const reflexionSection = state.reflexionContext
+    ? `\n[CROSS-SESSION LESSONS — recurring failure patterns on this project]\n${state.reflexionContext}\nIf the current failure matches a known pattern above, prioritize that explanation in your ROOT CAUSE.\n`
+    : "";
+
   // The debug-report block format is repeated BOTH at the top and bottom of every
   // system prompt. Models frequently complete their analysis and then omit the
   // structured block because they "already answered" above. The top reminder
@@ -206,7 +212,7 @@ Do NOT skip this block. Do NOT paraphrase it as prose. The block is parsed progr
 
 SUBTASK:
 ${taskDescription}
-${scopeSection}
+${scopeSection}${reflexionSection}
 ${lastResponse ? `CODER OUTPUT (excerpt):\n${lastResponse.slice(0, 400)}\n` : ""}
 INSTRUCTIONS:
 ${probeQuestions}
@@ -225,7 +231,7 @@ ${executionErrors.length > 0
 ${parsedSummary ? `\nPARSED LOCATION:\n${parsedSummary}` : ""}
 ${verifierFeedback ? `\nVERIFIER:\n${verifierFeedback}` : ""}
 ${originalError ? `\nORIGINAL ERROR:\n${originalError}` : ""}
-${scopeSection}
+${scopeSection}${reflexionSection}
 ${lastResponse ? `CODER ATTEMPT (excerpt):\n${lastResponse.slice(0, 600)}\n` : ""}
 PROBE: ${probeQuestions}
 

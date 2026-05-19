@@ -72,8 +72,26 @@ export async function checkVisualVerify(projectDir, devServerResult) {
       if (!hasContent) {
         const msg = "React #root div is empty — app did not mount. Check for JS errors in main.jsx or App.jsx.";
         log(colors.red(`  [VisualVerify] FAIL — ${msg}`));
+
+        // Fetch dev server logs to include in the error (helps AI diagnose runtime errors)
+        let logsSnippet = "";
+        if (devServerResult?.pid) {
+          try {
+            const logsResp = await fetch(
+              `${apiBase}/api/devserver/logs/${devServerResult.pid}?lines=60`,
+              { signal: AbortSignal.timeout(4000) },
+            );
+            if (logsResp.ok) {
+              const logsData = await logsResp.json();
+              if (logsData.logs) {
+                logsSnippet = `\n\nDev Server Logs (last 60 lines):\n${logsData.logs.slice(-3000)}`;
+              }
+            }
+          } catch { /* non-fatal */ }
+        }
+
         return [
-          `[VERIFIER VISUAL CHECK FAILED]\n\nApp URL: ${url}\nIssue: ${msg}\n\nThe React app is not rendering. Possible causes:\n  • Missing or incorrect default export in App.jsx\n  • Runtime error in component mount (check useEffect hooks)\n  • main.jsx not connecting to the #root element\n\nFix the render issue. The verifier will re-check on next retry.`,
+          `[VERIFIER VISUAL CHECK FAILED]\n\nApp URL: ${url}\nIssue: ${msg}\n\nThe React app is not rendering. Possible causes:\n  • Missing or incorrect default export in App.jsx\n  • Runtime error in component mount (check useEffect hooks)\n  • main.jsx not connecting to the #root element${logsSnippet}\n\nFix the render issue. The verifier will re-check on next retry.`,
         ];
       }
 

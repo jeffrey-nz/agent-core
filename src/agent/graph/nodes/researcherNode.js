@@ -159,10 +159,17 @@ export async function researcherNode(state, config) {
     ? [{ role: "user", content: `${state.retrievedContext}\n\nUse the above as a starting point — verify any facts from past sessions still hold before relying on them.` }]
     : [];
 
+  // Inject reflexion lessons (failure patterns + first-pass successes from prior sessions).
+  // Helps the researcher skip known dead-ends and focus on approaches that worked before.
+  const reflexionBlock = state.reflexionContext
+    ? [{ role: "user", content: `[LESSONS FROM PRIOR SESSIONS ON THIS PROJECT — avoid repeating these mistakes]\n${state.reflexionContext}` }]
+    : [];
+
   const messages = [
     { role: "system", content: systemPrompt },
     ...intentBlock,
     ...retrievedContextBlock,
+    ...reflexionBlock,
     ...sanitizedMessages,
   ];
 
@@ -397,6 +404,7 @@ PRE-FLIGHT APPLICATION HEALTH CHECK (web/server-side projects — run at the STA
 SKIP THIS ENTIRE SECTION if the task is to BUILD A NEW PROJECT from scratch (keywords: "build", "create", "write", "implement" + "new", "from scratch", "from the ground up") — there is no running server yet. Skip directly to codebase analysis.
 SKIP THIS SECTION for React/Vite/Next.js frontend-only projects with NO running dev server — making an http_request to localhost will hang for 60+ seconds and stall the pipeline. If you detect a Vite/React project (package.json contains "vite" or "react-dom"), proceed directly to code reading.
 SKIP THIS SECTION for Godot / Unity / Swift / native game engine projects — they have no HTTP server. Instead run the baseline syntax/test check described in the GODOT/UNITY/SWIFT PROJECT DETECTED section above.
+SKIP THIS SECTION for Python CLI / data-science / script projects (no Flask/Django/FastAPI server configured), Ruby gem / CLI projects (no Rails/Sinatra server), and Go CLI applications — they have no HTTP server. Proceed directly to code research using the language-specific directive below.
 Before reading any source code, discover the running application URL and make ONE http_request health check:
 1. URL DISCOVERY: Check the project config for the base URL:
    - .env / .env.local file (look for BASE_URL, APP_URL, SS_BASE_URL, SITE_URL, etc.)

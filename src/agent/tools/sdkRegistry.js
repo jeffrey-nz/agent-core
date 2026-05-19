@@ -35,6 +35,38 @@ function makeParamsSummary(name, args, rootDir) {
     );
   if (/list|dir/.test(n))
     return relativizePath(String(args.path || ""), rootDir);
+  if (/screenshot|inspect_page|click_element|wait_for_selector|evaluate_js/.test(n))
+    return String(args.url || "").replace(/^https?:\/\/localhost:\d+/, "localhost").slice(0, 60);
+  if (/start_dev_server/.test(n))
+    return args.project_dir ? relativizePath(String(args.project_dir), rootDir) : "dev server";
+  if (/stop_dev_server/.test(n))
+    return args.pid ? `pid ${args.pid}` : "dev server";
+  if (/get_dev_server_logs/.test(n))
+    return args.pid ? `logs pid ${args.pid}` : "dev server logs";
+  if (/git_commit/.test(n))
+    return String(args.message || "commit").slice(0, 60);
+  if (/git_push/.test(n))
+    return args.branch ? `→ ${args.branch}` : `→ ${args.remote || "origin"}`;
+  if (/git_branch/.test(n))
+    return String(args.name || "branch");
+  if (/git_diff/.test(n))
+    return args.path ? relativizePath(String(args.path), rootDir) : "working tree";
+  if (/git_inspect/.test(n))
+    return "status + diff";
+  if (/git_/.test(n))
+    return String(args.branch || args.name || args.message || "").slice(0, 40);
+  if (/http_request/.test(n))
+    return String(args.url || args.path || "").replace(/^https?:\/\/localhost:\d+/, "localhost").slice(0, 60);
+  if (/memory_/.test(n))
+    return String(args.key || args.name || "").slice(0, 40);
+  if (/github_create_issue/.test(n))
+    return String(args.title || "issue").slice(0, 50);
+  if (/github_update_issue/.test(n))
+    return args.issue_number ? `#${args.issue_number}${args.close ? " (close)" : ""}` : "issue";
+  if (/github_get_issues/.test(n))
+    return args.label ? `label:${args.label}` : "open issues";
+  if (/docs_write_page/.test(n))
+    return String(args.page || "page").slice(0, 40);
   return "";
 }
 
@@ -65,6 +97,7 @@ export async function getMcpBoundTools(context = {}) {
             tool: name,
             isError: true,
             result: errText,
+            errorSummary: err.message?.slice(0, 120) ?? "",
             elapsed: Date.now() - startTs,
           });
           throw err;
@@ -74,11 +107,13 @@ export async function getMcpBoundTools(context = {}) {
           typeof result === "string"
             ? result
             : (result?.text ?? String(result));
+        const isError = resultText.startsWith("[ERROR]") || result?.ok === false;
         eventBus.emit("tool_call_end", {
           callId,
           tool: name,
-          isError: resultText.startsWith("[ERROR]"),
+          isError,
           result: resultText.slice(0, 300),
+          ...(isError && result?.errorSummary ? { errorSummary: result.errorSummary } : {}),
           elapsed: Date.now() - startTs,
         });
 

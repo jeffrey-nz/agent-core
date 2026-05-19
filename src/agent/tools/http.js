@@ -209,9 +209,16 @@ export async function executeHttpTool(name, input) {
     });
     clearTimeout(timeoutId);
 
-    const responseBody = await res.text();
-    const errorContext = extractErrorContext(responseBody, res.status);
-    const authWarning = res.ok ? detectAuthRedirect(responseBody, url) : null;
+    const contentType = res.headers.get("content-type") || "";
+    const isBinary = /application\/octet-stream|image\/|audio\/|video\/|application\/zip|application\/pdf/.test(contentType);
+
+    const rawBody = isBinary ? "[BINARY RESPONSE — content-type: " + contentType + "]" : await res.text();
+    // Cap at 100 KB before expensive regex parsing to avoid stalling on large HTML error pages
+    const parseBody = isBinary ? rawBody : rawBody.slice(0, 100_000);
+    const responseBody = rawBody;
+
+    const errorContext = isBinary ? null : extractErrorContext(parseBody, res.status);
+    const authWarning = (res.ok && !isBinary) ? detectAuthRedirect(parseBody, url) : null;
 
     const lines = [
       `[HTTP ${method.toUpperCase()}] ${url}`,
@@ -236,10 +243,16 @@ export async function executeHttpTool(name, input) {
       );
     }
 
-    const displayBody =
-      responseBody.length > MAX_BODY_LENGTH
-        ? responseBody.slice(0, MAX_BODY_LENGTH) + `\n... [truncated]`
-        : responseBody;
+    let displayBody = responseBody;
+    if (responseBody.length > MAX_BODY_LENGTH) {
+      const cut = responseBody.slice(0, MAX_BODY_LENGTH);
+      // Snap to the last complete tag or line boundary for readability
+      const lastTag  = cut.lastIndexOf('>');
+      const lastLine = cut.lastIndexOf('\n');
+      const snap     = Math.max(lastTag, lastLine, MAX_BODY_LENGTH - 200);
+      displayBody    = responseBody.slice(0, snap)
+        + `\n... [TRUNCATED — ${(responseBody.length - snap).toLocaleString()} bytes omitted]`;
+    }
 
     lines.push("", "Response body:", displayBody);
 
@@ -254,8 +267,9 @@ export async function executeHttpTool(name, input) {
       const parsed = new URL(url);
       if (isDevDomain(parsed.hostname) && /ENOTFOUND|fetch failed|EAI_AGAIN/i.test(err.message)) {
         const curlRes = await fetchViaCurl(url, { method, headers, body, follow_redirects });
-        const errorContext = extractErrorContext(curlRes.body, curlRes.status);
-        const authWarning = curlRes.ok ? detectAuthRedirect(curlRes.body, url) : null;
+        const curlParseBody = curlRes.body.slice(0, 100_000);
+        const errorContext = extractErrorContext(curlParseBody, curlRes.status);
+        const authWarning = curlRes.ok ? detectAuthRedirect(curlParseBody, url) : null;
         const lines = [
           `[HTTP ${method.toUpperCase()}] ${url}`,
           `Status: ${curlRes.status} ${curlRes.ok ? "✅" : "❌"} (via curl --resolve)`,
@@ -276,9 +290,13 @@ export async function executeHttpTool(name, input) {
             "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
           );
         }
-        const displayBody = curlRes.body.length > MAX_BODY_LENGTH
-          ? curlRes.body.slice(0, MAX_BODY_LENGTH) + "\n... [truncated]"
-          : curlRes.body;
+        let displayBody = curlRes.body;
+        if (curlRes.body.length > MAX_BODY_LENGTH) {
+          const cut  = curlRes.body.slice(0, MAX_BODY_LENGTH);
+          const snap = Math.max(cut.lastIndexOf('>'), cut.lastIndexOf('\n'), MAX_BODY_LENGTH - 200);
+          displayBody = curlRes.body.slice(0, snap)
+            + `\n... [TRUNCATED — ${(curlRes.body.length - snap).toLocaleString()} bytes omitted]`;
+        }
         lines.push("", "Response body:", displayBody);
         return `<http_result url="${safeUrl}">\n${lines.join("\n")}\n</http_result>`;
       }

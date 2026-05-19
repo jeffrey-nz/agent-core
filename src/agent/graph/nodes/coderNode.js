@@ -316,23 +316,53 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
 
   // Hazard: App.tsx regression — never simplify App.tsx to a placeholder to fix build errors.
   // A common failure mode: the coder rewrites App.tsx to `return <div>App</div>` to clear
-  // TypeScript errors, making the build "pass" while destroying all game functionality.
+  // TypeScript errors, making the build "pass" while destroying all application functionality.
+  // Applies to any React/TypeScript project — not just games.
   const touchesAppTsx = (currentSubtask?.files || []).some(f => f.includes("App.tsx"))
     || /App\.tsx/.test(taskAndNote);
-  const isNewProjectOrGame = taskType === "new_project" || isGameTask;
-  if (touchesAppTsx && isNewProjectOrGame) {
+  if (touchesAppTsx && isReactFileTask) {
+    if (isGameTask || taskType === "new_project") {
+      hazards.push(
+        `⚠️ APP.TSX REGRESSION HAZARD — Never stub out App.tsx to fix TypeScript errors!\n` +
+        `FORBIDDEN pattern: export default function App() { return <div>App</div>; }\n` +
+        `This "fixes" the build by destroying all game/app functionality.\n` +
+        `\n` +
+        `RULES:\n` +
+        `1. NEVER write App.tsx with a minimal placeholder body (single <div> with text).\n` +
+        `2. If App.tsx has TypeScript errors, FIX the imports and types — do NOT simplify the render.\n` +
+        `3. App.tsx MUST import and render the actual feature components.\n` +
+        `4. If a component doesn't exist yet (written in a later subtask), import it but render\n` +
+        `   a loading state: {ready ? <MyComponent ... /> : <div>Loading...</div>}.\n` +
+        `5. Build failures → fix the TypeScript errors in the types files, NOT by removing JSX.`,
+      );
+    } else {
+      hazards.push(
+        `⚠️ APP.TSX REGRESSION HAZARD — Never strip App.tsx to a placeholder!\n` +
+        `FORBIDDEN pattern: export default function App() { return <div>App</div>; }\n` +
+        `\n` +
+        `If App.tsx has TypeScript errors:\n` +
+        `  - FIX the specific import or type that is wrong\n` +
+        `  - Do NOT rewrite the entire render to a <div> stub to make errors go away\n` +
+        `  - A stub App.tsx clears the build error but breaks the entire application\n` +
+        `Build failures → patch the affected type/import, NOT by simplifying App.tsx.`,
+      );
+    }
+  }
+
+  // ── Prisma hazard (Node.js/TypeScript) ──────────────────────────────────
+  // Prisma schema changes require TWO separate commands: migrate and generate.
+  // Forgetting either causes either a stale DB schema or stale TypeScript types.
+  if (/schema\.prisma|prisma.*migrate|prisma.*generate|prisma.*db\s*push/i.test(taskAndNote)) {
     hazards.push(
-      `⚠️ APP.TSX REGRESSION HAZARD — Never stub out App.tsx to fix TypeScript errors!\n` +
-      `FORBIDDEN pattern: export default function App() { return <div>Chess Game</div>; }\n` +
-      `This "fixes" the build by destroying all game functionality.\n` +
-      `\n` +
-      `RULES:\n` +
-      `1. NEVER write App.tsx with a minimal placeholder body (single <div> with text).\n` +
-      `2. If App.tsx has TypeScript errors, FIX the imports and types — do NOT simplify the render.\n` +
-      `3. App.tsx MUST render the actual game components (e.g. <ChessBoard>, <GameStatus>).\n` +
-      `4. If a component doesn't exist yet (written in a later subtask), import it but render\n` +
-      `   a loading state: {chessReady ? <ChessBoard ... /> : <div>Loading...</div>}.\n` +
-      `5. Build failures → fix the TypeScript errors in the types files, NOT by removing JSX.`,
+      `⚠️ PRISMA HAZARD — Schema changes require BOTH migration AND client regeneration\n` +
+      `After modifying schema.prisma you MUST run both commands:\n` +
+      `  1. execute_bash("npx prisma migrate dev --name <description> 2>&1")\n` +
+      `     (for production: use "prisma migrate deploy")\n` +
+      `  2. execute_bash("npx prisma generate 2>&1")\n` +
+      `     (regenerates @prisma/client TypeScript types — without this, queries using new fields will have type errors)\n\n` +
+      `If the project uses db push instead of migrate (prototyping / no migration history needed):\n` +
+      `  execute_bash("npx prisma db push 2>&1 && npx prisma generate 2>&1")\n\n` +
+      `NEVER skip prisma generate — TypeScript will not know about new schema fields until it runs.`,
     );
   }
 
@@ -378,15 +408,88 @@ function buildSubtaskHazards(currentTask, currentSubtask, projectType, taskType)
         `Same rule applies to dict, set, and any other mutable default.`,
       );
     }
+
+    // Python virtual environment — always use .venv/bin/python, not bare `python`
+    if (/execute_bash|run_command|pytest|manage\.py|flask|uvicorn|pip\s/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ PYTHON HAZARD — ALWAYS USE THE VIRTUAL ENVIRONMENT\n` +
+        `If a .venv/ directory exists, ALL python/pip/pytest commands MUST use it:\n` +
+        `  WRONG: execute_bash("pytest tests/ -v")         ← uses system Python, missing deps\n` +
+        `  WRONG: execute_bash("python -m pytest")          ← uses system Python, missing deps\n` +
+        `  RIGHT: execute_bash(".venv/bin/pytest tests/ -v")\n` +
+        `  RIGHT: execute_bash(".venv/bin/python -m pytest")\n\n` +
+        `First, verify the venv exists: execute_bash("test -d .venv && echo EXISTS || echo MISSING")\n` +
+        `If MISSING, create it: execute_bash("python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")\n` +
+        `If the project uses Poetry/Pipenv: use "poetry run pytest" or "pipenv run pytest" instead.`,
+      );
+    }
+  }
+
+  // ── Ruby hazards ────────────────────────────────────────────────────────────
+  if (projectType === "ruby") {
+    if (/rails.*server|rails\s+s\b|puma\b|bundle.*server/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ RUBY HAZARD — NEVER RUN THE RAILS SERVER VIA execute_bash\n` +
+        `"rails server", "rails s", and "puma" ALL block forever — the tool call will time out.\n` +
+        `Instead, verify route/controller logic by reading the source code.\n` +
+        `Use execute_bash("bundle exec rspec spec/requests/ 2>&1") to test HTTP behaviour without a server.`,
+      );
+    }
+    if (/models?\b|migration|rails.*db|activerecord/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ RUBY HAZARD — RAILS MODEL CHANGES REQUIRE MIGRATIONS\n` +
+        `After ANY change to app/models/*.rb (new field, new model, changed type), run:\n` +
+        `  execute_bash("bundle exec rails db:migrate 2>&1")\n` +
+        `A missing migration causes ActiveRecord::StatementInvalid at runtime.\n` +
+        `Include the migration output in your report as evidence.`,
+      );
+    }
+    if (/gemfile/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ RUBY HAZARD — GEMFILE CHANGE REQUIRES BUNDLE INSTALL\n` +
+        `After modifying Gemfile, you MUST run:\n` +
+        `  execute_bash("bundle install 2>&1")\n` +
+        `Without this, new gems are unavailable and require/bundler errors will appear at runtime.`,
+      );
+    }
+  }
+
+  // ── Go hazards ───────────────────────────────────────────────────────────────
+  if (projectType === "go") {
+    if (/go\s+run\b|ListenAndServe|grpc\.Serve|http\.Serve/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ GO HAZARD — NEVER RUN BLOCKING SERVERS VIA execute_bash\n` +
+        `"go run" for a program that calls http.ListenAndServe, grpc.Serve, or similar will block forever.\n` +
+        `Instead: verify handler logic by reading source code, and run tests:\n` +
+        `  execute_bash("go test ./... 2>&1")`,
+      );
+    }
+    if (/import|go\.mod|package/i.test(taskAndNote)) {
+      hazards.push(
+        `⚠️ GO HAZARD — RUN go mod tidy AFTER ADDING IMPORTS\n` +
+        `After adding any new import to a .go file, run:\n` +
+        `  execute_bash("go mod tidy 2>&1")\n` +
+        `This updates go.mod + go.sum. Missing it causes "no required module provides package" at build time.\n` +
+        `After go mod tidy, confirm the build is clean: execute_bash("go build ./... 2>&1")`,
+      );
+    }
   }
 
   // General hazard: test/REVIEW subtasks must NOT write files
   if (/^(REVIEW|LOCATE|FIND|IDENTIFY|INVESTIGATE|ACCEPTANCE TEST):/i.test(currentTask.trim())) {
+    const atVerifyHint =
+      projectType === "ruby"
+        ? "ACCEPTANCE TEST tasks: use execute_bash('bundle exec rspec spec/ 2>&1') — NEVER start the Rails server."
+        : projectType === "go"
+          ? "ACCEPTANCE TEST tasks: use execute_bash('go test ./... 2>&1') and execute_bash('go build ./... 2>&1') — NEVER run 'go run'."
+          : projectType === "python"
+            ? "ACCEPTANCE TEST tasks: use execute_bash('.venv/bin/python -m pytest --tb=short -q 2>&1') — NEVER run flask/uvicorn/manage.py runserver."
+            : "ACCEPTANCE TEST tasks: use execute_bash (Swift/Unity/Godot/CLI) or http_request (web) to verify.";
     hazards.push(
       `⚠️ TASK PROTOCOL — THIS IS A READ-ONLY OR VERIFICATION TASK\n` +
       `Do NOT write, create, or modify any files.\n` +
       `REVIEW/LOCATE/FIND tasks: use read_file and quote the specific line(s) that confirm/deny.\n` +
-      `ACCEPTANCE TEST tasks: use execute_bash (Swift) or http_request (web) to verify.`,
+      atVerifyHint,
     );
   }
 
@@ -907,7 +1010,9 @@ export async function coderNode(state, config) {
   // by contextRetrieverNode and persisted there by memoryUpdateNode at session end.
   // Distinct from per-subtask reflexionMemory: these are project-level failure patterns
   // accumulated across all past sessions, not just the current one.
-  const crossSessionReflexionSection = (state.reflexionContext && (state.coderRetryCount ?? 0) === 0)
+  // Injected on ALL attempts (not just retry 0) — the lessons are most critical when
+  // the first approach has already failed and the coder needs to try a different path.
+  const crossSessionReflexionSection = state.reflexionContext
     ? `\n[CROSS-SESSION LESSONS — failure patterns from prior sessions on this project]\n${state.reflexionContext}\nApply these lessons — do not repeat the same mistakes.\n`
     : "";
 

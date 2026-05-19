@@ -12,7 +12,7 @@ function isRetryableError(err) {
   // Explicit retryable flag from lower-level handlers
   if (err.retryable === true) return true;
   // Standard Node.js error codes for transient conditions
-  const retryableCodes = new Set(['EBUSY', 'EEXIST', 'ETIMEDOUT']);
+  const retryableCodes = new Set(['EBUSY', 'EEXIST', 'ETIMEDOUT', 'EMFILE', 'ENFILE', 'EAGAIN']);
   return err.code && retryableCodes.has(err.code);
 }
 

@@ -88,6 +88,38 @@ function makeParamsSummary(name, params, rootDir) {
     );
   if (/list|dir/.test(n))
     return relativizePath(String(params.path || ""), rootDir);
+  if (/screenshot|inspect_page|click_element|wait_for_selector|evaluate_js/.test(n))
+    return String(params.url || "").replace(/^https?:\/\/localhost:\d+/, "localhost").slice(0, 60);
+  if (/start_dev_server/.test(n))
+    return params.project_dir ? relativizePath(String(params.project_dir), rootDir) : "dev server";
+  if (/stop_dev_server/.test(n))
+    return params.pid ? `pid ${params.pid}` : "dev server";
+  if (/get_dev_server_logs/.test(n))
+    return params.pid ? `logs pid ${params.pid}` : "dev server logs";
+  if (/git_commit/.test(n))
+    return String(params.message || "commit").slice(0, 60);
+  if (/git_push/.test(n))
+    return params.branch ? `→ ${params.branch}` : `→ ${params.remote || "origin"}`;
+  if (/git_branch/.test(n))
+    return String(params.name || "branch");
+  if (/git_diff/.test(n))
+    return params.path ? relativizePath(String(params.path), rootDir) : "working tree";
+  if (/git_inspect/.test(n))
+    return "status + diff";
+  if (/git_/.test(n))
+    return String(params.branch || params.name || params.message || "").slice(0, 40);
+  if (/http_request/.test(n))
+    return String(params.url || params.path || "").replace(/^https?:\/\/localhost:\d+/, "localhost").slice(0, 60);
+  if (/memory_/.test(n))
+    return String(params.key || params.name || "").slice(0, 40);
+  if (/github_create_issue/.test(n))
+    return String(params.title || "issue").slice(0, 50);
+  if (/github_update_issue/.test(n))
+    return params.issue_number ? `#${params.issue_number}${params.close ? " (close)" : ""}` : "issue";
+  if (/github_get_issues/.test(n))
+    return params.label ? `label:${params.label}` : "open issues";
+  if (/docs_write_page/.test(n))
+    return String(params.page || "page").slice(0, 40);
   return "";
 }
 
@@ -126,6 +158,7 @@ export async function buildJsonToolsFollowUp({
     );
 
     const callId = `${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+    const callStartTs = Date.now();
     eventBus.emit("tool_call_start", {
       callId,
       tool: toolName,
@@ -252,6 +285,8 @@ export async function buildJsonToolsFollowUp({
       tool: toolName,
       isError,
       result: resultStr.slice(0, 300),
+      elapsed: Date.now() - callStartTs,
+      ...(isError ? { errorSummary: extractErrorSummary(resultStr) } : {}),
     });
 
     results.push({
