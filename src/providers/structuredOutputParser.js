@@ -257,13 +257,27 @@ export class StructuredOutputParser {
       const isPlaceholderPath = (fp) =>
         !fp || !fp.startsWith("/") || /^\.*$/.test(fp) || fp.trim() === "...";
 
+      // Strip a leading and/or trailing markdown code fence wrapping the file body.
+      // The chat-UI-friendly prompt asks the AI to wrap content in ```...``` so the
+      // markdown renderer keeps indentation intact. The fences themselves must not
+      // end up on disk — strip exactly one outer pair if present.
+      const stripFences = (s) => {
+        if (typeof s !== "string") return s;
+        let out = s;
+        // Leading ```optional-language\n
+        out = out.replace(/^[ \t]*```[a-zA-Z0-9_+-]*\r?\n/, "");
+        // Trailing \n?```
+        out = out.replace(/\r?\n[ \t]*```[ \t]*\r?\n?$/, "\n");
+        return out;
+      };
+
       // 7a: strict — <<<END FILE>>> present
       {
         const re = /<<<FILE:\s*([^\n>]+?)[ \t]*>>>\r?\n([\s\S]*?)<<<END FILE>>>/g;
         let m;
         while ((m = re.exec(text)) !== null) {
           const fp = m[1].trim();
-          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: m[2] });
+          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: stripFences(m[2]) });
         }
       }
 
@@ -273,7 +287,7 @@ export class StructuredOutputParser {
         let m;
         while ((m = re.exec(text)) !== null) {
           const fp = m[1].trim();
-          const content = m[2].replace(/\n?<<<END FILE>>>\s*$/, "").replace(/\n?TASK_DONE\s*$/, "");
+          const content = stripFences(m[2].replace(/\n?<<<END FILE>>>\s*$/, "").replace(/\n?TASK_DONE\s*$/, ""));
           if (fp && content && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content });
         }
       }
@@ -284,7 +298,7 @@ export class StructuredOutputParser {
         let m;
         while ((m = re.exec(text)) !== null) {
           const fp = m[1].trim();
-          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: m[2] });
+          if (fp && !isPlaceholderPath(fp)) fileBlocks.push({ tool: "write_file", path: fp, content: stripFences(m[2]) });
         }
       }
 

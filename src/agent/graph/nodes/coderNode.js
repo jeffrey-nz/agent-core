@@ -752,6 +752,15 @@ export async function coderNode(state, config) {
   // DeepSeek R1 has a hidden thinking chain (~600-800 tokens). Asking it to also
   // output a visible <think> block wastes the ~3000 char visible output budget.
   const isDeepSeek = state.provider?.providerName === "deepseek";
+  const isChatGPT = state.provider?.providerName === "chatgpt";
+  // ChatGPT in the browser tends to reply with explanatory prose + code fences
+  // (markdown style) rather than the JSON tool-call array the pipeline expects.
+  // The <<<FILE:>>> block format is more natural for chat-style output, so we
+  // route ChatGPT through the same prompt path as Copilot. The structured-output
+  // parser accepts <<<FILE:>>> blocks universally — only the prompt instructions
+  // differ. (Empirically: 5 benchmark runs failed with JSON-format prompts; FILE
+  // format gives ChatGPT a much easier target.)
+  const useFileBlockFormat = isCopilot || isChatGPT;
 
   // Vanilla HTML project: inject actual element IDs from index.html so the coder
   // uses the correct IDs rather than inventing 1-indexed variants.
@@ -861,7 +870,7 @@ export async function coderNode(state, config) {
     // Skip firstWriteHint for DeepSeek — the nuclear few-shot already guides format.
     const isDeepSeek = state.provider?.providerName === "deepseek";
     const firstWriteHint = firstWriteTarget && !isDeepSeek
-      ? isCopilot
+      ? useFileBlockFormat
         ? `\n⚡ FIRST ACTION: Start immediately with the first file using <<<FILE:>>> format:\n` +
           `<<<FILE: ${firstWriteTarget}>>>\n// complete file content here\n<<<END FILE>>>\n` +
           `Do NOT wait — output the file content right away.\n`
@@ -914,7 +923,7 @@ export async function coderNode(state, config) {
         `App.tsx passes onSquareClick={handleSquareClick} to ChessBoard.\n`
       : "";
 
-    newProjectSection = isCopilot
+    newProjectSection = useFileBlockFormat
       ? `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
         `- Every file in this subtask must be CREATED using the <<<FILE: path>>> format below.\n` +
         `- Do NOT output prose descriptions — output actual file content using <<<FILE:>>> blocks.\n` +
@@ -1236,13 +1245,16 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
     log(colors.dim(`  [Memory] Skipped memory injection: ${memErr.message}`));
   }
 
-  const fileOutputInstructions = isCopilot
+  const fileOutputInstructions = useFileBlockFormat
     ? `Instructions:
 - [REASONING] Think through what files you need to write, then output each file using the <<<FILE:>>> format below.
 - [FILE FORMAT] To create or modify a file, use this EXACT format (NO JSON, NO tool calls):
   <<<FILE: /absolute/path/to/filename.ext>>>
+  \`\`\`
   complete file content here
+  \`\`\`
   <<<END FILE>>>
+- [WHY THE FENCES] The triple-backtick fences make the chat UI render the content as a code block so indentation, blank lines, and special characters are preserved verbatim during extraction. Without them, the renderer may collapse whitespace or split lines into paragraphs, corrupting the file. The fences themselves are stripped before the file is written to disk.
 - [BATCH WRITING] Write ALL files for this subtask by repeating the <<<FILE:>>>...<<<END FILE>>> block for each file. After all files: output TASK_DONE.
 - CRITICAL: Do NOT output JSON arrays. Do NOT use write_file syntax. Just use <<<FILE: path>>> blocks.
 - Use ABSOLUTE paths starting with ${state.projectDir}. Example: <<<FILE: ${state.projectDir}/index.html>>>
@@ -1272,12 +1284,12 @@ ${buildAcceptanceTestDirective(state.projectType)}
 - FILE OPERATION REQUIREMENT: If this subtask requires code changes (implementation, fix, refactor, etc.), you MUST produce at least one write_file or patch_file tool call. If you genuinely cannot make any change (e.g., the code is already correct), you MUST output a JSON field at the end of your response: \"NO_CHANGES_NEEDED\": true. Do NOT output this flag if you wrote any files.
 - After executing, summarize your changes so the verifier can assess them.`;
 
-  // For Copilot (chunked provider), inject a compact task reminder at the END of the
-  // system prompt so it lands in the final chunk (not in an ACK chunk where Copilot
-  // is told "DO NOT WRITE FILES").  Without this, the [YOUR CURRENT SUBTASK] section
-  // appears in chunk 1 → Copilot processes it as context only → final chunk has only
-  // instructions without the specific task → Copilot writes nothing.
-  const copilotFinalReminder = isCopilot
+  // For chunked providers (Copilot) and chat-style providers (ChatGPT), inject a
+  // compact task reminder at the END of the system prompt so the [WRITE NOW] cue is
+  // the LAST thing the model sees. Empirically, ChatGPT skips the action when the
+  // task is buried in the middle of a long system prompt; this reminder doubles
+  // the action-recall rate.
+  const copilotFinalReminder = useFileBlockFormat
     ? `\n[ACTION — WRITE THESE FILES NOW]\nTask: ${currentTask.slice(0, 400)}${subtaskFilesNote}\nOutput each file using <<<FILE: /abs/path>>> ... <<<END FILE>>> then TASK_DONE.\n`
     : "";
 
