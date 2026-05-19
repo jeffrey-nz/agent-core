@@ -3503,6 +3503,10 @@ Do NOT skip the build command or declare success without a clean build.`}${capWa
     }
   }
 
+  eventBus.emit("system_message", {
+    text: `◎ Running validation — syntax, compilation, smoke test…`,
+    type: "info",
+  });
   const validationResult = await runAdvancedValidator(
     state.projectDir,
     state.modifiedFiles,
