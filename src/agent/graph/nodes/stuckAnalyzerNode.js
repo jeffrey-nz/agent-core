@@ -89,7 +89,11 @@ function classifyFailurePattern(messages, lastExecutionErrors) {
 export async function stuckAnalyzerNode(state, config) {
   log(colors.yellow("  [Graph] -> 🧠 Running Stuck Analyzer — deep failure-pattern investigation..."));
   eventBus.emit("persona_change", { ...PERSONA, description: "Re-analysing strategy after repeated failures" });
-  eventBus.emit("phase_change", { phase: "RESEARCHING", label: "Re-analysing strategy..." });
+  eventBus.emit("phase_change", { phase: "DEBUGGING", label: "Analyzing failure pattern…" });
+  eventBus.emit("system_message", {
+    text: `🧠 Stuck Analyzer — investigating failure pattern after ${state.coderRetryCount ?? 0} retries`,
+    type: "info",
+  });
 
   const currentSubtask = state.subtasks?.[state.currentSubtaskIndex];
   const taskDescription = currentSubtask?.task || state.messages?.[0]?.content || "";
