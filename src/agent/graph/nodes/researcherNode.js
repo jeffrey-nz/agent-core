@@ -323,6 +323,10 @@ export async function researcherNode(state, config) {
     : "";
 
   log(colors.green("  [Graph] -> Research Complete."));
+  eventBus.emit("system_message", {
+    text: `✓ Research complete — ${Math.round(fullText.length / 100) / 10}KB gathered`,
+    type: "info",
+  });
 
   const projectType = isMultiDir ? "multi" : projectCtx.projectType;
   updateCheckpointState({ projectType, projectConstraints: mergedConstraints });

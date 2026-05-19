@@ -411,6 +411,10 @@ Re-output the complete SCOPE DOCUMENT with these line-level details filled in. U
   }
 
   log(colors.cyan(`  [Graph] -> Scope Document complete (${scopeDocument.length} chars).`));
+  eventBus.emit("system_message", {
+    text: `✓ Scoping complete — ${Math.round(scopeDocument.length / 100) / 10}KB scope document`,
+    type: "info",
+  });
   updateCheckpointState({ scopeDocument });
 
   return {
