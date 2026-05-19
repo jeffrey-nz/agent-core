@@ -161,6 +161,18 @@ export async function debuggerNode(state, config) {
   const failureMode = classifyFailure(executionErrors, parsed, lastResponse);
   log(colors.dim(`  [Graph] -> 🔍 Failure mode: ${failureMode}`));
 
+  const subtaskIdx = (state.currentSubtaskIndex ?? 0) + 1;
+  const FAILURE_LABELS = {
+    env_blocked: "environment blockage",
+    inaction: "coder inaction loop",
+    stagnant: "stagnant error (no progress)",
+    wrong_output: "incorrect output",
+  };
+  eventBus.emit("system_message", {
+    text: `🔍 Debugger — ${FAILURE_LABELS[failureMode] || failureMode} on subtask ${subtaskIdx}`,
+    type: "info",
+  });
+
   const probeQuestions = failureMode === "inaction"
     ? buildInactionProbeQuestions(currentSubtask, scopeDocument)
     : buildErrorProbeQuestions(parsed, executionErrors, taskDescription);
