@@ -55,9 +55,19 @@ export async function runAdvancedValidator(projectDir, modifiedFilesAbs) {
   if (errors.length > 0) {
     log(
       colors.red(
-        `\n  [Verifier] ✘ Blocked! Deterministic errors or failing tests detected.`,
+        `\n  [Verifier] ✘ Blocked! ${errors.length} deterministic error(s) detected:`,
       ),
     );
+    // Surface the first 3 errors (truncated) so users can see WHY the verifier blocked.
+    // The full errors are still passed back to the coder in the next turn.
+    for (let i = 0; i < Math.min(errors.length, 3); i++) {
+      const err = errors[i];
+      const summary = typeof err === "string" ? err.slice(0, 400) : JSON.stringify(err).slice(0, 400);
+      log(colors.red(`    ${i + 1}. ${summary.split("\n")[0]}`));
+    }
+    if (errors.length > 3) {
+      log(colors.dim(`    ... and ${errors.length - 3} more`));
+    }
   }
 
   return {

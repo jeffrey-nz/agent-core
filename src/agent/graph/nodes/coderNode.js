@@ -792,9 +792,12 @@ export async function coderNode(state, config) {
   // Build the subtask block - includes planned file list, line range, implementation
   // note, and constraints from the enriched planner output so the coder knows
   // exactly what to touch and what to write without re-reading every file.
+  const _currentFiles = Array.isArray(currentSubtask?.files)
+    ? currentSubtask.files
+    : (typeof currentSubtask?.files === "string" && currentSubtask.files ? [currentSubtask.files] : []);
   const subtaskFilesNote =
-    currentSubtask?.files?.length > 0
-      ? `\nExpected files to create/modify:\n${currentSubtask.files.map((f) => `  - ${f}`).join("\n")}`
+    _currentFiles.length > 0
+      ? `\nExpected files to create/modify:\n${_currentFiles.map((f) => `  - ${f}`).join("\n")}`
       : "";
   const subtaskLineRangeNote = currentSubtask?.lineRange
     ? `\nTarget line range: ${currentSubtask.lineRange}`
@@ -824,8 +827,8 @@ export async function coderNode(state, config) {
     completedSubtasks.length > 0
       ? `\n[PRIOR SUBTASKS COMPLETED - do not re-create these files]\n${completedSubtasks
           .map((s) => {
-            const filesStr =
-              s.files?.length > 0 ? ` → wrote: ${s.files.join(", ")}` : "";
+            const files = Array.isArray(s.files) ? s.files : (typeof s.files === "string" && s.files ? [s.files] : []);
+            const filesStr = files.length > 0 ? ` → wrote: ${files.join(", ")}` : "";
             return `  ✓ Subtask ${s.id}: ${s.task}${filesStr}`;
           })
           .join("\n")}\n`
@@ -1443,10 +1446,17 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
     // coder runs. DeepSeek sees this planning conversation and outputs [] (done)
     // because it thinks the planning phase completed the work. Starting a fresh
     // chat at the beginning of each subtask gives DeepSeek a clean context.
-    if (isLimitedOutputProvider && retryCount === 0 && !isStallRetry && state.provider?.startNewChat) {
+    //
+    // ChatGPT also accumulates context: observed in benchmark runs where a coder
+    // turn produced "CRITIC REPORT\nHIDDEN ASSUMPTIONS..." — the model echoed the
+    // critic format from prior turns instead of writing code. Fresh chat per
+    // subtask prevents this kind of context-induced format confusion.
+    const needsFreshChatPerSubtask = isLimitedOutputProvider ||
+      state.provider?.providerName === "chatgpt";
+    if (needsFreshChatPerSubtask && retryCount === 0 && !isStallRetry && state.provider?.startNewChat) {
       try {
         await state.provider.startNewChat();
-        log(colors.dim(`  [Graph] -> Fresh chat started for coder subtask ${state.currentSubtaskIndex + 1} (limited-output provider)`));
+        log(colors.dim(`  [Graph] -> Fresh chat started for coder subtask ${state.currentSubtaskIndex + 1} (${state.provider.providerName})`));
       } catch (startErr) {
         log(colors.dim(`  [Graph] -> Fresh chat start failed (${startErr.message}) — using existing session`));
       }

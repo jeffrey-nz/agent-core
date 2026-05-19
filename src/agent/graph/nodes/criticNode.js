@@ -118,10 +118,11 @@ export async function criticNode(state, config) {
   const signal = config?.signal ?? null;
 
   const planText = state.subtasks
-    .map(
-      (s, i) =>
-        `Subtask ${i + 1}: [${s.task}]\n  Files: ${s.files?.join(", ") || "(none)"}\n  Note: ${s.implementation_note || s.implementationNote || "(none)"}`,
-    )
+    .map((s, i) => {
+      const files = Array.isArray(s.files) ? s.files : (typeof s.files === "string" && s.files ? [s.files] : []);
+      const filesStr = files.length > 0 ? files.join(", ") : "(none)";
+      return `Subtask ${i + 1}: [${s.task}]\n  Files: ${filesStr}\n  Note: ${s.implementation_note || s.implementationNote || "(none)"}`;
+    })
     .join("\n\n");
 
   const inputContent = [

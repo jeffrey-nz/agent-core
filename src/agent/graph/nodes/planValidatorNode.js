@@ -90,7 +90,10 @@ export async function planValidatorNode(state, config) {
   const planSummary = state.subtasks
     .map(
       (s, i) =>
-        `${i + 1}. [${s.task}]\n   Files: ${s.files?.join(", ") || "(none)"}\n   Note: ${s.implementation_note || s.implementationNote || "(none)"}\n   Criteria: ${s.acceptanceCriteria || "(n/a)"}`,
+        (() => {
+          const f = Array.isArray(s.files) ? s.files : (typeof s.files === "string" && s.files ? [s.files] : []);
+          return `${i + 1}. [${s.task}]\n   Files: ${f.length > 0 ? f.join(", ") : "(none)"}\n   Note: ${s.implementation_note || s.implementationNote || "(none)"}\n   Criteria: ${s.acceptanceCriteria || "(n/a)"}`;
+        })(),
     )
     .join("\n\n");
 
@@ -168,6 +171,20 @@ export async function planValidatorNode(state, config) {
     log(colors.yellow("  [Graph] -> Plan Validator: empty revised subtask list — keeping original plan"));
     return { planValidated: true, currentPersona: PERSONA.id };
   }
+
+  // Normalize each subtask so downstream nodes can rely on the shape:
+  // `files` must be an array (AI sometimes emits a single string), `task` must be a string.
+  revisedSubtasks = revisedSubtasks.map((s, i) => {
+    const filesNorm = Array.isArray(s.files)
+      ? s.files
+      : (typeof s.files === "string" && s.files ? [s.files] : []);
+    return {
+      ...s,
+      task: typeof s.task === "string" ? s.task : String(s.task ?? ""),
+      files: filesNorm,
+      id: s.id ?? i + 1,
+    };
+  });
 
   // Sanity check: don't accept a revised plan with far fewer subtasks (likely truncated)
   if (revisedSubtasks.length < Math.ceil(state.subtasks.length * 0.6)) {

@@ -880,7 +880,32 @@ The prompt already specifies the exact file, exact line, and exact change needed
       continue;
     }
 
-    const candidateSubtasks = parsed.subtasks || [];
+    let candidateSubtasks = parsed.subtasks || [];
+
+    // Recovery: some models return [{goal, success_criteria}] or {goal, success_criteria}
+    // instead of {subtasks: [...]}. Synthesize subtasks from success_criteria so we don't
+    // waste retries — each criterion becomes a one-line subtask. The criteria are usually
+    // file-shaped ("models.py defines X", "test_x.py covers Y") and map well to subtasks.
+    if (candidateSubtasks.length === 0) {
+      const goalObj = Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "object" ? parsed[0] : parsed;
+      const criteria = Array.isArray(goalObj?.success_criteria) ? goalObj.success_criteria
+                     : Array.isArray(goalObj?.successCriteria) ? goalObj.successCriteria
+                     : null;
+      if (criteria && criteria.length > 0) {
+        log(colors.dim(`  [Graph] -> Project Manager attempt ${attempt}: deriving ${criteria.length} subtask(s) from success_criteria`));
+        candidateSubtasks = criteria.map((c, i) => {
+          const text = typeof c === "string" ? c : (c?.description || JSON.stringify(c));
+          // Try to extract a filename from the criterion ("models.py defines ...")
+          const fileMatch = text.match(/\b([a-zA-Z0-9_/-]+\.[a-zA-Z]{1,5})\b/);
+          return {
+            task: text.slice(0, 200),
+            files: fileMatch ? [fileMatch[1]] : [],
+            implementation_note: text,
+            acceptanceCriteria: text,
+          };
+        });
+      }
+    }
 
     if (candidateSubtasks.length === 0) {
       lastAttemptError = new Error("Project Manager produced zero subtasks");
