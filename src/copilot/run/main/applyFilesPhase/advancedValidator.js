@@ -58,12 +58,20 @@ export async function runAdvancedValidator(projectDir, modifiedFilesAbs) {
         `\n  [Verifier] ✘ Blocked! ${errors.length} deterministic error(s) detected:`,
       ),
     );
-    // Surface the first 3 errors (truncated) so users can see WHY the verifier blocked.
-    // The full errors are still passed back to the coder in the next turn.
+    // Surface the first 3 errors with the most signal-rich line (SyntaxError, Test Failure,
+    // etc.) so users can see WHY the verifier blocked without grepping the full log.
     for (let i = 0; i < Math.min(errors.length, 3); i++) {
       const err = errors[i];
-      const summary = typeof err === "string" ? err.slice(0, 400) : JSON.stringify(err).slice(0, 400);
-      log(colors.red(`    ${i + 1}. ${summary.split("\n")[0]}`));
+      const text = typeof err === "string" ? err : JSON.stringify(err);
+      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      // Show the header line + the first line that names the actual error
+      const header = lines[0] || "(no error text)";
+      const signalLine = lines.find((l) =>
+        /SyntaxError|IndentationError|TypeError|NameError|ImportError|TestFailure|FAIL|Error:|expected|invalid/i.test(l)
+        && l !== header,
+      );
+      log(colors.red(`    ${i + 1}. ${header.slice(0, 200)}`));
+      if (signalLine) log(colors.red(`       → ${signalLine.slice(0, 200)}`));
     }
     if (errors.length > 3) {
       log(colors.dim(`    ... and ${errors.length - 3} more`));
