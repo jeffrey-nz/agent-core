@@ -237,11 +237,14 @@ RULES:
     eventBus.emit("message_complete", {});
   } else {
     const _scopeTurnStart = Date.now();
+    let _scopeElapsedSteps = 0;
     const _scopeTicker = setInterval(() => {
+      _scopeElapsedSteps++;
       const elapsed = Math.round((Date.now() - _scopeTurnStart) / 1000);
       eventBus.emit("spinner_update", {
         status: `Scoper - deep-reading codebase (${elapsed}s)...`,
       });
+      eventBus.emit("research_progress", { step: _scopeElapsedSteps, elapsed });
     }, 10000);
 
     let result;

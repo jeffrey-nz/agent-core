@@ -99,6 +99,10 @@ If NO (plan needs updating): respond with PLAN_REVISED on the first line, then l
   };
 
   log(colors.yellow(`  [PlanReview] Plan revised: ${remaining.length} → ${revisedTasks.length} remaining subtasks`));
+  eventBus.emit("system_message", {
+    text: `↻ Plan revised — ${revisedTasks.length} subtask${revisedTasks.length !== 1 ? "s" : ""} remaining`,
+    type: "info",
+  });
   eventBus.emit("plan_revision", { revision });
   eventBus.emit("plan_update", {
     steps: newSubtasks.map((s, i) => ({
