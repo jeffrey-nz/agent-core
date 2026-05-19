@@ -16,6 +16,7 @@ export async function getAllToolJsonSchemas() {
     { gitTools },
     { githubTools },
     { memoryTools },
+    { browserTools },
   ] = await Promise.all([
     import("./definitions/filesystem.js"),
     import("./definitions/search.js"),
@@ -27,6 +28,7 @@ export async function getAllToolJsonSchemas() {
     import("./definitions/git.js"),
     import("./definitions/github.js"),
     import("./definitions/memory.js"),
+    import("./definitions/browser.js"),
   ]);
 
   const allTools = {
@@ -40,6 +42,7 @@ export async function getAllToolJsonSchemas() {
     ...gitTools,
     ...githubTools,
     ...memoryTools,
+    ...browserTools,
   };
 
   const result = {};

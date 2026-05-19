@@ -12,6 +12,7 @@ import { executeDiagnosticsTool } from "./diagnostics/executor.js";
 import { executeGitTool } from "./git.js";
 import { executeGithubTool } from "./github/executor.js";
 import { executeMemoryTool } from "./memory.js";
+import { executeBrowserTool } from "./browser.js";
 
 const FILESYSTEM_TOOLS = new Set([
   "read_file",
@@ -57,6 +58,13 @@ const GITHUB_TOOLS = new Set([
 ]);
 
 const MEMORY_TOOLS = new Set(["memory_save", "memory_list", "memory_delete"]);
+
+const BROWSER_TOOLS = new Set([
+  "screenshot_url",
+  "inspect_page",
+  "start_dev_server",
+  "stop_dev_server",
+]);
 
 // Tools that mutate state - blocked when context.readOnly is true.
 const WRITE_TOOLS = new Set([
@@ -120,6 +128,8 @@ export async function dispatchTool(name, args, context) {
     executor = () => executeGithubTool(name, args, context);
   } else if (MEMORY_TOOLS.has(name)) {
     executor = () => executeMemoryTool(name, args, context);
+  } else if (BROWSER_TOOLS.has(name)) {
+    executor = () => executeBrowserTool(name, args, context);
   } else {
     return { ok: false, error: `Unknown tool: ${name}`, text: `[ERROR] Unknown tool: ${name}` };
   }

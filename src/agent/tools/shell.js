@@ -48,7 +48,13 @@ export async function executeShellTool(name, input, { rootDir }) {
     }
 
     if (BLOCKING_CMD_PATTERNS.some(p => p.test(cmd))) {
-      return `[BLOCKED] "${cmd}" starts a long-running dev server and will hang the pipeline. Do NOT run dev servers directly.\n\n• To verify the build compiles: use \`npm run build\`\n• The pipeline's visual verification system will start and screenshot the app automatically after your files are verified.\n\nProceed with other verification steps (build check, lint, tests).`;
+      return `[BLOCKED] "${cmd}" starts a long-running dev server and will hang the pipeline. Do NOT run dev servers via execute_bash.\n\n` +
+        `Instead, use the dedicated dev-server tools:\n` +
+        `  1. start_dev_server()          — starts the dev server, returns a URL and PID\n` +
+        `  2. screenshot_url(url)         — captures a browser screenshot so you can see the UI\n` +
+        `  3. inspect_page(url)           — checks React mount status, console errors, DOM state\n` +
+        `  4. stop_dev_server(pid)        — cleans up when done\n\n` +
+        `To verify compilation only (no screenshot needed): use \`npm run build\` instead.`;
     }
 
     const safeCmd = cmd;

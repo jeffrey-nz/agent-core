@@ -180,7 +180,12 @@ PROJECT SETUP (MANDATORY for all new Node.js / React / Vite projects — enforce
 - GITIGNORE FIRST: The VERY FIRST file written for any new project MUST be .gitignore. It MUST contain at minimum: node_modules/, dist/, .env, *.log, .DS_Store, coverage/, .vite/. Skipping this causes git to track thousands of dependency files — the verifier will reject the subtask.
 - README REQUIRED: Every new project MUST include README.md with: project name, one-line description, and the commands: npm install, npm run dev, npm run build, npm test.
 - NO FAKE DEPS: NEVER add non-package entries to package.json dependencies or devDependencies. Keys starting with "#" (e.g. "#test-run", "#acceptance-test", "#marker") are NOT valid npm syntax and will be detected and rejected by the verifier. Track task completion in code or comments — never in package.json.
-- NO DEV SERVER IN EXECUTE_BASH: NEVER run "npm run dev", "vite", "next dev", or any other long-running dev server command via execute_bash. These commands block forever and will time out. The verifier automatically starts and stops the dev server — you do NOT need to do this.`;
+- DEV SERVER — USE TOOLS, NOT execute_bash: NEVER run "npm run dev", "vite", "next dev", or any long-running server command via execute_bash — these block forever and time out. Instead, use the dedicated tools:
+    start_dev_server()          → starts the server, returns { pid, url }
+    screenshot_url(url)         → captures a real browser screenshot so you can SEE the running app
+    inspect_page(url)           → checks React mount status, console errors, import failures, DOM snippet
+    stop_dev_server(pid)        → cleans up the process when done
+  After writing files for a web app, always call start_dev_server → screenshot_url → inspect_page to verify the result visually. If inspect_page shows errorOverlay or consoleErrors, fix the issue before reporting the subtask complete.`;
 
 const PYTHON_CONSTRAINTS = `[PROJECT TYPE: Python]
 - Dependency management: pip / poetry / pipenv (check for requirements.txt, pyproject.toml, or Pipfile)
@@ -672,6 +677,17 @@ REACT / WEB UI QUALITY STANDARDS (apply to all React, Vue, and web app tasks):
   2. Mirror those names exactly in the caller — do not abbreviate via shorthand syntax in a way that changes the keys.
   3. If you must use shorthand, name the local variables to match: const row = r, col = c; then pass {row, col}.
   4. Manually trace one invocation in your head: "callee receives to.row = ?". If it reads undefined, the call is broken.
+
+- WEB APP VISUAL VERIFICATION (for React / Vite / Next.js / Nuxt projects):
+  After writing all files for a web task, verify the running app — do NOT rely on build-pass alone.
+  Use these tools in sequence:
+    1. start_dev_server()           — spins up the dev server, returns { pid, url }
+    2. screenshot_url(url)          — captures a live browser screenshot; Claude can SEE the result
+    3. inspect_page(url)            — returns React mount status, console errors, import failures, DOM snippet
+    4. stop_dev_server(pid)         — cleans up when done
+  If inspect_page reports errorOverlay or consoleErrors: fix the issue and re-verify before reporting complete.
+  If the screenshot shows a blank white page or only a loading spinner: call inspect_page to diagnose the root cause.
+  NEVER run "npm run dev" via execute_bash — it blocks forever. Use start_dev_server instead.
 `;
 
 const SILVERSTRIPE_CODER_DIRECTIVE = `

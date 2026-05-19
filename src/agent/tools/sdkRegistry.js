@@ -81,6 +81,16 @@ export async function getMcpBoundTools(context = {}) {
           result: resultText.slice(0, 300),
           elapsed: Date.now() - startTs,
         });
+
+        // If the tool attached an image (e.g. screenshot_url), return a multi-part
+        // content array so the model can see the image directly.
+        if (result?._image) {
+          return [
+            { type: "text",  text: result.text ?? "Result" },
+            { type: "image", image: result._image.base64, mediaType: result._image.mimeType },
+          ];
+        }
+
         return result;
       },
     });
