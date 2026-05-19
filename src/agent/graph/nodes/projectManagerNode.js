@@ -1243,6 +1243,13 @@ The prompt already specifies the exact file, exact line, and exact change needed
     ),
   );
 
+  // Notify the UI so the user sees the plan scope before execution begins
+  const n = subtasks.length;
+  eventBus.emit("system_message", {
+    text: `✓ Plan ready — ${n} subtask${n !== 1 ? "s" : ""} scheduled`,
+    type: "info",
+  });
+
   // Detect project type from disk so verifier gates fire correctly.
   // For new projects, project.godot is usually created in subtask 1 — if not yet
   // on disk, fall back to keyword detection from the original task description.
