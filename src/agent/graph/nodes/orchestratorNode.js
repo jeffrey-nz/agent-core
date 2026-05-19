@@ -107,11 +107,18 @@ OUTPUT FORMAT - respond with ONLY valid JSON, no prose, no markdown:
 function classifyByKeywords(taskText) {
   const lower = taskText.toLowerCase();
 
-  // Documentation: explicit request to create/write a doc-format file
+  // Documentation: explicit request to create/write a doc-format file.
+  // Guard: don't classify as documentation when a strong new-project verb+noun pair is
+  // also present — e.g. "Build a Python calculator ... create requirements.txt" should
+  // route to new_project, not documentation, despite the .txt extension.
+  const hasNewProjectSignal =
+    /\b(build|create|make|develop|implement|scaffold)\b.{0,60}\b(app|application|game|tool|project|dashboard|website|site|calculator|chess|todo|weather|snake|tetris|widget|library|module|package|api|server|service)\b/i.test(taskText);
   if (
-    /\b(create|write|add|make|generate|produce|draft)\b.{0,80}\b(markdown|\.md\b|readme|documentation file|doc file|changelog|\.txt\b|\.rst\b)\b/i.test(taskText) ||
-    /\b(single|new)\s+(markdown|md)\s+(file|document)\b/i.test(taskText) ||
-    /\bmarkdown\s+(document|file)\b.{0,60}\b(record|list|document|describe)\b/i.test(lower)
+    !hasNewProjectSignal && (
+      /\b(create|write|add|make|generate|produce|draft)\b.{0,80}\b(markdown|\.md\b|readme|documentation file|doc file|changelog|\.txt\b|\.rst\b)\b/i.test(taskText) ||
+      /\b(single|new)\s+(markdown|md)\s+(file|document)\b/i.test(taskText) ||
+      /\bmarkdown\s+(document|file)\b.{0,60}\b(record|list|document|describe)\b/i.test(lower)
+    )
   ) {
     return { taskType: "documentation", rationale: "Keyword match: explicit request to create a documentation file" };
   }
