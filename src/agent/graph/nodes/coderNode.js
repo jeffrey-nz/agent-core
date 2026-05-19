@@ -1743,9 +1743,53 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         // session and send a minimal, targeted prompt that fits in a single chunk.
         const isChunkedProvider = (state.provider?.maxPromptChars ?? Infinity) <= 9500;
         const isLimitedOutputProvider = state.provider?.providerName === "deepseek";
+        const isChatGPTNuclear = state.provider?.providerName === "chatgpt";
         let nuclearMessages;
         let nuclearContext = context;
-        if ((isChunkedProvider || isLimitedOutputProvider) && plannedFiles.length > 0 && state.projectDir) {
+        if (isChatGPTNuclear && plannedFiles.length > 0 && state.projectDir) {
+          // ChatGPT-specific nuclear retry. The default nuclear branch instructs
+          // the model to output JSON tool calls, but ChatGPT renders multi-line
+          // JSON through its markdown pipeline and the content field arrives
+          // with mangled escaping/paragraph breaks. The <<<FILE:>>> format
+          // sidesteps that entirely — it's already the format that works for
+          // the normal coder turn.
+          const firstFile = plannedFiles[0];
+          const absFirstFile = path.isAbsolute(firstFile) ? firstFile : path.join(state.projectDir, firstFile);
+          const ext = path.extname(firstFile).toLowerCase().replace(".", "") || "txt";
+          const implNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
+          const shortTask = (implNote || bareTask).slice(0, 400).replace(/\n/g, " ");
+          log(colors.yellow(`  [Graph] -> Nuclear retry: ChatGPT — using <<<FILE:>>> format`));
+          eventBus.emit("session_role_update", {
+            role: "auxiliary", status: "active",
+            provider: _provName,
+            task: "nuclear retry",
+          });
+          log(colors.dim(`  [Sessions] auxiliary active · ${_provName} · nuclear retry`));
+          try { await state.provider.startNewChat?.(); } catch { /* ignore */ }
+          nuclearContext = { ...context, interactionMode: "scoping", skipConstraint: true };
+          nuclearMessages = [
+            {
+              role: "user",
+              content: [
+                `Task: ${shortTask}`,
+                ``,
+                `Write the file using EXACTLY this format and nothing else:`,
+                ``,
+                `<<<FILE: ${absFirstFile}>>>`,
+                "```" + ext,
+                `(complete file content here — real implementation, no placeholders)`,
+                "```",
+                `<<<END FILE>>>`,
+                `TASK_DONE`,
+                ``,
+                `Critical rules:`,
+                `- Use the absolute path EXACTLY as shown above.`,
+                `- The triple-backticks make the chat UI preserve indentation — keep them.`,
+                `- Do NOT output JSON. Do NOT output prose explanation. Only the FILE block.`,
+              ].join("\n"),
+            },
+          ];
+        } else if ((isChunkedProvider || isLimitedOutputProvider) && plannedFiles.length > 0 && state.projectDir) {
           const firstFile = plannedFiles[0] || "file.js";
           const ext = path.extname(firstFile).toLowerCase();
           const absFirstFile = path.isAbsolute(firstFile) ? firstFile : path.join(state.projectDir, firstFile);
