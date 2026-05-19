@@ -48,6 +48,7 @@ export async function getMcpBoundTools(context = {}) {
       inputSchema: jsonSchema(def.parameters),
       execute: async (args) => {
         const callId = `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+        const startTs = Date.now();
         eventBus.emit("tool_call_start", {
           callId,
           tool: name,
@@ -64,6 +65,7 @@ export async function getMcpBoundTools(context = {}) {
             tool: name,
             isError: true,
             result: errText,
+            elapsed: Date.now() - startTs,
           });
           throw err;
         }
@@ -77,6 +79,7 @@ export async function getMcpBoundTools(context = {}) {
           tool: name,
           isError: resultText.startsWith("[ERROR]"),
           result: resultText.slice(0, 300),
+          elapsed: Date.now() - startTs,
         });
         return result;
       },
