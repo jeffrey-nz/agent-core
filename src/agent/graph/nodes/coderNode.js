@@ -1258,19 +1258,29 @@ ${codeErrors.map((e) => `  [${e.tool}] ${e.summary.slice(0, 200)}`).join("\n")}`
     }
 
     // Remind the model that <think> must be followed IMMEDIATELY by tool calls.
-    // The example path is built from THIS subtask's real planned file so the
-    // model cannot echo a stale placeholder. A hardcoded "/abs/src/App.tsx"
-    // example was previously copied verbatim into write_file calls — wrong path
-    // AND wrong language (App.tsx in a Python project), wasting every retry.
+    // The example path is built ONLY from a known-real file (this subtask's
+    // planned file, else a file already modified this session) so the model
+    // cannot echo a stale or fake placeholder. A hardcoded "/abs/src/App.tsx"
+    // example was previously copied verbatim into write_file calls; a generic
+    // "your_target_file" fallback was likewise echoed as a real path. When no
+    // real file is known, the example omits a concrete path entirely.
     const exampleFile = (() => {
-      const f = (currentSubtask?.files || []).find((x) => typeof x === "string" && x.trim());
-      if (f) return path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
-      return path.join(state.projectDir || "", "your_target_file");
+      const planned = (currentSubtask?.files || []).find((x) => typeof x === "string" && x.trim());
+      if (planned) return path.isAbsolute(planned) ? planned : path.join(state.projectDir || "", planned);
+      const modified = (state.modifiedFiles || state.allModifiedFiles || []).find(
+        (x) => typeof x === "string" && x.trim(),
+      );
+      if (modified) return path.isAbsolute(modified) ? modified : path.join(state.projectDir || "", modified);
+      return null;
     })();
     const jsonOnlyReminder = retryCount >= 1
       ? isDeepSeek
-        ? `\n⚠️ MANDATORY ON RETRY: Output the JSON tool call array IMMEDIATELY — no preamble. Example:\n\`\`\`json\n[{"tool":"write_file","path":"${exampleFile}","content":"...full file content..."}]\n\`\`\`\nThen output: TASK_DONE\nDo NOT explain. Do NOT describe. Just the JSON code block.\n`
-        : `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY. Use the REAL file path for THIS subtask — do not copy the example path literally. Example:\n<think>\nTask: implement the subtask\nRead first: ${exampleFile}\n</think>\n[{"tool":"read_file","path":"${exampleFile}"}]\n... (after reading) ...\n[{"tool":"write_file","path":"${exampleFile}","content":"...full file content..."}]\nTASK_DONE\nDo NOT output <think> alone — it does nothing without the following JSON array.\n`
+        ? (exampleFile
+            ? `\n⚠️ MANDATORY ON RETRY: Output the JSON tool call array IMMEDIATELY — no preamble. Example:\n\`\`\`json\n[{"tool":"write_file","path":"${exampleFile}","content":"...full file content..."}]\n\`\`\`\nThen output: TASK_DONE\nDo NOT explain. Do NOT describe. Just the JSON code block.\n`
+            : `\n⚠️ MANDATORY ON RETRY: Output the JSON tool call array IMMEDIATELY — no preamble. Use the ACTUAL absolute path of the file this subtask requires. Then output: TASK_DONE. Do NOT explain. Just the JSON code block.\n`)
+        : (exampleFile
+            ? `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY. Use the REAL file path for THIS subtask — do not copy the example path literally. Example:\n<think>\nTask: implement the subtask\nRead first: ${exampleFile}\n</think>\n[{"tool":"read_file","path":"${exampleFile}"}]\n... (after reading) ...\n[{"tool":"write_file","path":"${exampleFile}","content":"...full file content..."}]\nTASK_DONE\nDo NOT output <think> alone — it does nothing without the following JSON array.\n`
+            : `\n⚠️ MANDATORY ON RETRY: After your <think> block, output the JSON tool call array IMMEDIATELY — write_file/patch_file with the ACTUAL absolute path of the file this subtask requires, then TASK_DONE. Do NOT output <think> alone — it does nothing without the following JSON array.\n`)
       : "";
 
     // ── Strategy Diversification ─────────────────────────────────────────────

@@ -1,8 +1,39 @@
+import path from "node:path";
+import fs from "node:fs";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
 import { eventBus } from "#web/eventBus.js";
+import { execAsync } from "#utils/exec.js";
 import { classifyEnvironmentError } from "#agent/utils/executionOutputAnalysis.js";
 import { MAX_VERIFIER_RETRIES } from "#config/pipeline.js";
+
+// Run the project's pytest suite and return the precise failure output, or "".
+// The LLM expert reviewers give natural-language verdicts ("invalid characters
+// must raise ValueError") that the coder often can't act on precisely. Feeding
+// the exact pytest failure ("test_invalid_characters: DID NOT RAISE ValueError")
+// alongside the prose gives the coder a deterministic target.
+async function collectPytestFailure(projectDir) {
+  if (!projectDir) return "";
+  try {
+    const hasTests = fs.readdirSync(projectDir).some(
+      (f) => /^test_.+\.py$/.test(f) || /_test\.py$/.test(f),
+    );
+    if (!hasTests) return "";
+  } catch {
+    return "";
+  }
+  const venvPython = path.join(projectDir, ".venv", "bin", "python");
+  const hasVenv = fs.existsSync(venvPython);
+  const cmd = hasVenv
+    ? `"${venvPython}" -m pytest --tb=short -q 2>&1`
+    : "python3 -m pytest --tb=short -q 2>&1";
+  const res = await execAsync(cmd, { cwd: projectDir, timeout: 120000 }).catch((e) => e);
+  const out = ((res?.stdout || "") + (res?.stderr || "")).trim();
+  if (!out || /No module named pytest|command not found/i.test(out)) return "";
+  const passedClean = /\d+ passed/.test(out) && !/\d+ failed/.test(out) && !/\d+ error/.test(out);
+  if (passedClean) return "";
+  return out.slice(-2500);
+}
 
 // Single source of truth from pipeline config — prevents silent drift between
 // the verifier's force-advance threshold and the aggregator's stuck-analysis threshold.
@@ -162,6 +193,18 @@ export async function aggregatorNode(state) {
     failedReviews.forEach((r) => {
       combinedFeedback += `--- ${r.persona} Expert ---\n${r.feedback}\n\n`;
     });
+
+    // Deterministic ground truth: if pytest is failing, the expert prose above
+    // is just a symptom — give the coder the exact failing test and traceback
+    // so it has a precise target instead of guessing from natural language.
+    const pytestFailure = await collectPytestFailure(state.projectDir);
+    if (pytestFailure) {
+      combinedFeedback +=
+        `--- DETERMINISTIC TEST FAILURE (pytest) ---\n` +
+        `The test suite is failing. Fix the implementation so ALL tests pass.\n` +
+        `Exact pytest output:\n\`\`\`\n${pytestFailure}\n\`\`\`\n\n`;
+      log(colors.dim("  [Graph] -> ⚖️ Attached precise pytest failure to coder feedback."));
+    }
 
     // Post a coder-response note to the issue so the review→fix loop is visible on GitHub.
     // This creates the thread: reviewer posts finding → coder responds with fix plan.
