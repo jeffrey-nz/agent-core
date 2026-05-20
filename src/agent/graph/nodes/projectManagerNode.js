@@ -968,9 +968,15 @@ The prompt already specifies the exact file, exact line, and exact change needed
       );
       const fileListsSeen = new Set();
       const CONFIG_FILES = new Set(["project.godot", "package.json", "tsconfig.json", "vite.config.ts"]);
+      // A subtask that explicitly appends/extends an existing file legitimately
+      // shares that file with the subtask that created it — this is the planned
+      // multi-section split for files over the 40-line write_file limit, not
+      // lazy duplication. Exempt it from the duplicate-file-list check.
+      const APPEND_SIGNAL = /\b(append|extend|continue|continued|part\s*\d|section|finish|remaining|rest of)\b/i;
       const duplicateFileLists = implSubtasks.some(s => {
         const uniqueNonConfig = s.files.filter(f => !CONFIG_FILES.has(path.basename(f)));
         if (uniqueNonConfig.length === 0) return false; // config-only subtasks are OK (first scaffold)
+        if (APPEND_SIGNAL.test(String(s.task))) return false; // planned section-split append
         const key = uniqueNonConfig.slice().sort().join("|");
         if (fileListsSeen.has(key)) return true;
         fileListsSeen.add(key);
@@ -980,9 +986,11 @@ The prompt already specifies the exact file, exact line, and exact change needed
         lastAttemptError = new Error("new_project plan has subtasks with duplicate file lists — subtasks must target unique files");
         log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: duplicate file lists across subtasks — retrying`));
         jsonErrorOverride =
-          `PLAN REJECTED — multiple subtasks list the same files. Each subtask must target UNIQUE files.\n\n` +
+          `PLAN REJECTED — multiple subtasks list the same files with no indication they are a planned split.\n\n` +
           `Rules:\n` +
-          `- Each game/app subtask must list at least 1 unique .gd, .tscn, .js, .ts, or source file not used in any other subtask\n` +
+          `- Each subtask must EITHER target a unique source file OR be a section-split of a large file\n` +
+          `- A large file (>40 lines) may be split across subtasks: the first subtask WRITES the file, and each later subtask's task MUST start with "Append " (e.g. "Append GameState.ts move logic"). The word "Append" marks it as an intentional split\n` +
+          `- Do NOT list the same file in two subtasks unless the later one is an explicit "Append ..." subtask\n` +
           `- "project.godot" / "package.json" may appear ONLY in the first (scaffold) subtask\n` +
           `- Keep each subtask very concise (task ≤ 80 chars, implementation_note ≤ 120 chars)\n` +
           `Output ONLY the JSON object — no markdown, no prose, no explanation.`;
