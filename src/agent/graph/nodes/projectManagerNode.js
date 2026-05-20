@@ -748,7 +748,15 @@ The prompt already specifies the exact file, exact line, and exact change needed
     // Detect provider service errors (rate limit / service outage).
     // When the provider returns this, all retries will also fail — break
     // immediately so the fallback synthesizes a plan without burning quota.
-    if (/we are experiencing an issue/i.test(planText) || /please try submitting a new message/i.test(planText)) {
+    const isChatGptErrorCard =
+      /something went wrong/i.test(planText) &&
+      /help\.openai\.com|issue persists/i.test(planText) &&
+      planText.trim().length < 400;
+    if (
+      /we are experiencing an issue/i.test(planText) ||
+      /please try submitting a new message/i.test(planText) ||
+      isChatGptErrorCard
+    ) {
       lastAttemptError = new Error("Provider service error (rate-limited or service outage)");
       log(colors.yellow(`  [Graph] -> Project Manager attempt ${attempt}: provider service error — breaking retry loop`));
       break;

@@ -50,10 +50,30 @@ export async function runAutomationApiTurn({
 
   let initialResponse;
   let sessionRecoveryAttempted = false;
+  let chatGptErrorRetried = false;
 
   while (true) {
     try {
       initialResponse = await sendAutomationTurn({ state, promptText, label, signal, rootDir, skipConstraint });
+      // ChatGPT intermittently renders a transient error card ("Something went
+      // wrong. If this issue persists ... help.openai.com") as the assistant
+      // turn. The bridge scrapes that text as the response, so every turn type
+      // (projectManager, coder, reviewers) silently consumes the error string
+      // as if it were a real answer. Re-send once — the error clears on its own.
+      if (
+        !chatGptErrorRetried &&
+        typeof initialResponse === "string" &&
+        initialResponse.length < 400 &&
+        /something went wrong/i.test(initialResponse) &&
+        /help\.openai\.com|issue persists/i.test(initialResponse)
+      ) {
+        chatGptErrorRetried = true;
+        log(colors.yellow(
+          `  [Automation API] Turn "${label}" hit a transient ChatGPT error — re-sending once after a short wait.`,
+        ));
+        await new Promise((r) => setTimeout(r, 4000));
+        continue;
+      }
       break;
     } catch (err) {
       if (err.selfHealEscape) throw err;
