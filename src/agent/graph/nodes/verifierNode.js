@@ -501,18 +501,28 @@ async function _verifierImpl(state) {
   // subtask after the scaffold so a missing package.json/vite.config never silently
   // cascades through the rest of the pipeline.
   if (state.projectDir && (state.currentSubtaskIndex ?? 0) >= 1) {
-    // Only trigger scaffold check for React+Vite projects. A vanilla HTML+JS project
-    // may have a src/ directory with .ts files but should NOT be required to have
-    // package.json, App.tsx, or vite.config.ts. Detect React+Vite by checking for
-    // clear markers: src/App.tsx exists, or vite.config.ts exists, or package.json
-    // with a react dependency exists.
+    // Only trigger this scaffold check for React+Vite WEB projects. It must NOT
+    // fire for React Native / Expo projects — those have App.tsx at the root,
+    // app.json, and NO vite.config.ts / index.html, so requiring Vite scaffold
+    // files would fail every RN subtask. Detect React+Vite by a real Vite
+    // marker (vite.config.ts or src/App.tsx); a bare package.json is not
+    // enough — every Node project has one.
     const srcHasAppTsx = await fs.promises.access(path.join(state.projectDir, "src", "App.tsx"))
       .then(() => true).catch(() => false);
     const hasViteConfig = await fs.promises.access(path.join(state.projectDir, "vite.config.ts"))
       .then(() => true).catch(() => false);
-    const hasPkgJson = await fs.promises.access(path.join(state.projectDir, "package.json"))
+    // React Native / Expo detection: app.json present, or package.json declares
+    // expo / react-native. Such a project is explicitly excluded from the
+    // Vite-web scaffold check.
+    let isExpoOrReactNative = await fs.promises.access(path.join(state.projectDir, "app.json"))
       .then(() => true).catch(() => false);
-    const isReactViteProject = srcHasAppTsx || hasViteConfig || hasPkgJson;
+    if (!isExpoOrReactNative) {
+      try {
+        const pkgRaw = await fs.promises.readFile(path.join(state.projectDir, "package.json"), "utf-8");
+        if (/"(expo|react-native)"\s*:/.test(pkgRaw)) isExpoOrReactNative = true;
+      } catch { /* no package.json */ }
+    }
+    const isReactViteProject = !isExpoOrReactNative && (srcHasAppTsx || hasViteConfig);
     if (isReactViteProject) {
       const scaffoldToCheck = ["package.json", "src/App.tsx", "vite.config.ts", "index.html"];
       const missingScaffold = [];
