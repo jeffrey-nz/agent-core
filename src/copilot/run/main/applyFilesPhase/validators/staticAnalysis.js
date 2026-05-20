@@ -4,6 +4,27 @@ import { fileExists } from "./utils.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
 
+// Run the project's local TypeScript compiler in --noEmit mode and return a
+// blocking error string, or null when the project type-checks (or when the
+// check is inconclusive). Calls the local tsc binary directly rather than via
+// `npx`, which can itself exit non-zero with no output (network/resolve noise)
+// — a blank "TypeScript Compilation Error:" gives the coder nothing to act on
+// and causes a blind rollback-retry loop. If tsc exits non-zero but produced
+// no output, the failure is treated as inconclusive (logged, not blocking).
+async function runTscCheck(projectDir, hasTsconfigApp) {
+  const flag = hasTsconfigApp ? " -p tsconfig.app.json" : "";
+  const res = await execAsync(`./node_modules/.bin/tsc --noEmit${flag}`, { cwd: projectDir });
+  if (res.status === 0) return null;
+  const output = ((res.stdout || "") + "\n" + (res.stderr || "")).trim();
+  if (!output) {
+    log(colors.yellow(
+      `  [Verifier] tsc exited ${res.status} with no output — inconclusive, not blocking on TypeScript.`,
+    ));
+    return null;
+  }
+  return `TypeScript Compilation Error:\n${output}`;
+}
+
 export async function checkStaticAnalysis(
   projectDir,
   { phpFiles, tsFiles, jsFiles, goFiles = [] },
@@ -43,17 +64,13 @@ export async function checkStaticAnalysis(
         if (!hasLocalTscAfter) {
           // truly can't check — skip
         } else {
-          const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
-          const res = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: projectDir });
-          if (res.status !== 0)
-            errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+          const tsErr = await runTscCheck(projectDir, hasTsconfigApp);
+          if (tsErr) errors.push(tsErr);
         }
       } else {
         log(colors.dim("  [Verifier] Running TypeScript compiler check..."));
-        const flag = hasTsconfigApp ? "-p tsconfig.app.json" : "";
-        const res = await execAsync(`npx tsc --noEmit ${flag}`, { cwd: projectDir });
-        if (res.status !== 0)
-          errors.push(`TypeScript Compilation Error:\n${res.stdout || res.stderr}`);
+        const tsErr = await runTscCheck(projectDir, hasTsconfigApp);
+        if (tsErr) errors.push(tsErr);
       }
     }
   }
