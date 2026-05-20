@@ -153,6 +153,14 @@
  *      The build passes, `go test ./...` reports "ok" with 0 tests, giving false confidence.
  *      → If test functions found in a non-_test.go file: FAIL with rename instructions
  *
+ *  16. CROSS-FILE PYTHON IMPORT CHECK (project-level, runs if any .py files modified)
+ *      For every `from <localmodule> import <Name>` in a modified .py file, verifies
+ *      that <localmodule>.py actually defines <Name>. py_compile accepts a bad import
+ *      (it's valid syntax) — the error only surfaces at runtime/pytest as ImportError
+ *      (pytest exit 2). Catching it here names the exact missing symbol AND lists what
+ *      the module does export, which a raw "ImportError" traceback does not.
+ *      → If an imported name is missing from a local module: FAIL with both halves
+ *
  * Position in graph: coder → patchReviewer → [OK] verifier
  *                                           → [FAIL] coder
  *
@@ -1217,6 +1225,84 @@ export async function patchReviewerNode(state) {
           }
         } catch {
           // Regex compilation failed — skip this pattern
+        }
+      }
+    }
+  }
+
+  // Cross-file Python import check — catches `from <localmodule> import <Name>`
+  // where <localmodule>.py exists in the project but does not define <Name>.
+  // py_compile accepts this (valid syntax); the failure only appears at import
+  // time as ImportError (pytest exit 2). A raw traceback does not tell the coder
+  // what the module DOES export — this check does, so the fix is unambiguous.
+  const pyFilesForImportCheck = modifiedFiles.filter(
+    (f) => /\.py$/i.test(f) && !f.includes("/.venv/") && !f.includes("/site-packages/"),
+  );
+  if (pyFilesForImportCheck.length > 0 && projectDir) {
+    const moduleExportsCache = new Map();
+    const getModuleExports = async (modName) => {
+      if (moduleExportsCache.has(modName)) return moduleExportsCache.get(modName);
+      const modPath = path.join(projectDir, modName.replace(/\./g, "/") + ".py");
+      let exports = null;
+      try {
+        const src = await fs.readFile(modPath, "utf8");
+        exports = new Set();
+        for (const m of src.matchAll(/^(?:async\s+)?def\s+([A-Za-z_]\w*)/gm)) exports.add(m[1]);
+        for (const m of src.matchAll(/^class\s+([A-Za-z_]\w*)/gm)) exports.add(m[1]);
+        // top-level assignments: NAME = ...  /  NAME: type = ...
+        for (const m of src.matchAll(/^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=[^=]/gm)) exports.add(m[1]);
+        // re-exports: from X import Y  (Y becomes importable from this module)
+        for (const m of src.matchAll(/^from\s+\S+\s+import\s+(.+)$/gm)) {
+          for (const part of m[1].split(",")) {
+            const nm = part.trim().replace(/[()]/g, "").split(/\s+as\s+/).pop().trim();
+            if (nm && nm !== "*") exports.add(nm);
+          }
+        }
+        // import X / import X as Y
+        for (const m of src.matchAll(/^import\s+(.+)$/gm)) {
+          for (const part of m[1].split(",")) {
+            const seg = part.trim();
+            const nm = /\s+as\s+/.test(seg) ? seg.split(/\s+as\s+/).pop().trim() : seg.split(".")[0].trim();
+            if (nm) exports.add(nm);
+          }
+        }
+      } catch {
+        exports = null; // not a local module (stdlib / third-party) — skip
+      }
+      moduleExportsCache.set(modName, exports);
+      return exports;
+    };
+
+    for (const relPath of pyFilesForImportCheck) {
+      const absPath = path.isAbsolute(relPath) ? relPath : path.join(projectDir, relPath);
+      let src;
+      try { src = await fs.readFile(absPath, "utf8"); } catch { continue; }
+      const importRe = /^from\s+([A-Za-z_][\w.]*)\s+import\s+(.+)$/gm;
+      let im;
+      while ((im = importRe.exec(src)) !== null) {
+        const modName = im[1];
+        const importClause = im[2].trim();
+        if (importClause === "*" || importClause.startsWith("*")) continue;
+        const exports = await getModuleExports(modName);
+        if (!exports) continue; // not a local project module
+        const names = importClause.replace(/[()]/g, "").split(",")
+          .map((p) => p.trim().split(/\s+as\s+/)[0].trim())
+          .filter(Boolean);
+        const missing = names.filter((n) => !exports.has(n));
+        if (missing.length > 0) {
+          const avail = [...exports].slice(0, 25).join(", ");
+          allIssues.push({
+            file: relPath,
+            type: "PYTHON_CROSS_FILE_IMPORT",
+            description:
+              `${path.basename(relPath)} does \`from ${modName} import ${missing.join(", ")}\`, ` +
+              `but ${modName}.py does NOT define ${missing.length > 1 ? "those names" : "that name"}.\n` +
+              `This passes py_compile (valid syntax) but fails at import time with ImportError — pytest reports exit 2.\n\n` +
+              `${modName}.py currently exports: ${avail || "(nothing at top level)"}\n\n` +
+              `FIX: either (a) add ${missing.join(", ")} to ${modName}.py, OR ` +
+              `(b) change the import in ${path.basename(relPath)} to a name ${modName}.py actually exports. ` +
+              `Pick ONE and apply it — do not just re-run the tests.`,
+          });
         }
       }
     }

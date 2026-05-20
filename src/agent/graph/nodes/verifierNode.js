@@ -666,6 +666,29 @@ ${failedTask}${capWarning}`,
     } catch {}
   }
 
+  // Strip a leaked "# FILE: <path>" / "// FILE: <path>" header line.
+  // The `# FILE:` headed-block format is meant to be consumed (and stripped) by
+  // the extraction parser, but when the coder writes a file via execute_bash
+  // (heredoc/tee) it bypasses that parser and the marker lands as line 1 of the
+  // file. Harmless in Python (a comment) but breaks non-`#`-comment languages —
+  // normalize it away for every modified file.
+  if (Array.isArray(state.modifiedFiles) && state.modifiedFiles.length > 0) {
+    const HEADER_RE = /^[ \t]*(?:#|\/\/)[ \t]*FILE:[ \t]*(\S+)[ \t]*\r?\n/;
+    for (const f of state.modifiedFiles) {
+      const abs = path.isAbsolute(f) ? f : path.join(state.projectDir || "", f);
+      try {
+        const content = fs.readFileSync(abs, "utf-8");
+        const m = content.match(HEADER_RE);
+        // Only strip when the header points at a path (has a slash or extension)
+        // so a legitimate "# FILE: notes" comment is never removed.
+        if (m && (m[1].includes("/") || /\.[A-Za-z0-9]+$/.test(m[1]))) {
+          fs.writeFileSync(abs, content.slice(m[0].length));
+          log(colors.dim(`  [Verifier] Stripped leaked "# FILE:" header from ${path.basename(abs)}`));
+        }
+      } catch {}
+    }
+  }
+
   if (!state.modifiedFiles || state.modifiedFiles.length === 0) {
     const currentTask =
       state.subtasks?.[state.currentSubtaskIndex]?.task ||
@@ -2754,6 +2777,31 @@ DEBUGGING STRATEGY:
     }
 
     const newRetryCount = (state.coderRetryCount ?? 0) + 1;
+
+    // Hard cap enforcement: the no-files retry path previously had only a soft
+    // cap warning in the prompt. A command-only subtask (run tests, install
+    // deps, demonstrate CLI) legitimately writes no files, so the coder can
+    // never satisfy the "write a file" demand — the loop ran forever (observed
+    // on python-expr-eval subtask 8/8: retries 1/3 → 5/3 and climbing).
+    //
+    // Cap-out force-advances the subtask: if every prior subtask verified the
+    // real work, a trailing run/demo subtask producing no files is a silent
+    // pass, and downstream ensemble review still catches genuine failures.
+    if (newRetryCount > effectiveMaxRetries) {
+      log(colors.yellow(
+        `  [Graph] -> No-files cap reached (${newRetryCount} > ${effectiveMaxRetries}). Force-advancing — trailing run/verify subtask, assuming silent pass.`,
+      ));
+      eventBus.emit("system_message", {
+        text: `⚠️ Subtask force-skipped after ${effectiveMaxRetries} no-files retries — proceeding`,
+        type: "warning",
+      });
+      emitTaskCompleted(state);
+      const taskLabelCap = state.subtasks?.[state.currentSubtaskIndex]?.task || "no-files subtask";
+      await commitVerifiedSubtask(state.projectDir, taskLabelCap);
+      await closeSubIssueForSubtask(state);
+      return { verifierFeedback: "ENVIRONMENT_BLOCKED", coderRetryCount: 0 };
+    }
+
     log(colors.red(`  [Graph] -> Verifier failed: coder wrote no files. Retry ${newRetryCount}/${effectiveMaxRetries}.`));
     eventBus.emit("system_message", { text: `✗ Retry ${newRetryCount}: no files written - nudging coder`, type: "warning" });
     const atCap = newRetryCount >= effectiveMaxRetries;

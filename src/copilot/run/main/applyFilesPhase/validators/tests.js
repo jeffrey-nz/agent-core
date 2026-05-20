@@ -4,7 +4,32 @@ import { fileExists } from "./utils.js";
 import { log } from "#app/ui/log.js";
 import { colors } from "#app/ui/colors.js";
 
-export async function checkTests(projectDir, { phpTestFiles, jsTestFiles, rubyTestFiles = [], goTestFiles = [], pythonTestFiles = [] }) {
+async function projectHasPythonTests(projectDir) {
+  const fs = await import("node:fs/promises");
+  const seen = new Set();
+  const isTestFile = (name) => /^test_.+\.py$/.test(name) || /_test\.py$/.test(name);
+  async function scan(dir, depth) {
+    if (depth > 3) return false;
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+    catch { return false; }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (/^(\.|node_modules|__pycache__|\.venv|venv|dist|build)/.test(e.name)) continue;
+        const sub = path.join(dir, e.name);
+        if (seen.has(sub)) continue;
+        seen.add(sub);
+        if (await scan(sub, depth + 1)) return true;
+      } else if (isTestFile(e.name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return scan(projectDir, 0);
+}
+
+export async function checkTests(projectDir, { phpTestFiles, jsTestFiles, rubyTestFiles = [], goTestFiles = [], pythonTestFiles = [], pyFiles = [] }) {
   const errors = [];
 
   if (
@@ -155,8 +180,16 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles, rubyTe
     }
   }
 
-  // Python tests — run pytest when Python test files are modified
-  if (pythonTestFiles.length > 0) {
+  // Python tests — run pytest when test files were modified, OR when a Python
+  // SOURCE file changed and the project already has test files on disk. The
+  // second case catches cross-file API breakage (e.g. a subtask renames a
+  // module's public function so an existing test's import fails) at the
+  // subtask that causes it — not only when a test file itself is touched.
+  const pySourceChanged = pyFiles.some((f) => !pythonTestFiles.includes(f));
+  const shouldRunPytest =
+    pythonTestFiles.length > 0 ||
+    (pySourceChanged && (await projectHasPythonTests(projectDir)));
+  if (shouldRunPytest) {
     const requirementsPath = path.join(projectDir, "requirements.txt");
     const setupPyPath = path.join(projectDir, "setup.py");
     const pyprojectPath = path.join(projectDir, "pyproject.toml");
@@ -185,7 +218,21 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles, rubyTe
       } else {
         const passed = /\d+ passed/.test(output) && !/\d+ failed/.test(output) && !/\d+ error/.test(output);
         const noTests = /no tests ran|collected 0 items/i.test(output);
-        if (noTests) {
+        // When pytest was triggered only by a SOURCE change (no test file in this
+        // subtask), the project may still be mid-build: a test importing a
+        // not-yet-written module fails with ModuleNotFoundError, which is NOT a
+        // real bug. Suppress that case; only flag genuine API mismatches
+        // ("ImportError: cannot import name X from Y" — Y exists, X doesn't) and
+        // real assertion failures.
+        const triggeredBySourceChangeOnly = pythonTestFiles.length === 0;
+        const isIncompleteBuildNoise =
+          triggeredBySourceChangeOnly &&
+          /ModuleNotFoundError|No module named/i.test(output) &&
+          !/cannot import name/i.test(output) &&
+          !/\bassert\b|AssertionError/i.test(output);
+        if (triggeredBySourceChangeOnly && (noTests || isIncompleteBuildNoise)) {
+          log(colors.dim("  [Verifier] pytest (source-change check) — incomplete build or no tests yet, skipping."));
+        } else if (noTests) {
           // Pytest found no test functions in the modified test files. This is a false-passing
           // run — 0 items collected means the code is completely untested.
           errors.push(

@@ -621,6 +621,34 @@ export async function runAutomationAgentLoop({
         }
       }
 
+      // ── Garbled-path repair (BEFORE placeholder detection) ──────────────────
+      // The model sometimes corrupts the long opaque project root when echoing it
+      // (observed: a /var/folders/... temp path with a duplicated middle segment).
+      // If a write path is "outside project" but still contains the project-dir's
+      // own basename as an intact path segment, the model clearly meant a file in
+      // the project — reconstruct it as rootDir + (everything after that segment)
+      // instead of burning correction retries.
+      if (state.rootDir) {
+        const rootBase = state.rootDir.split("/").filter(Boolean).pop() || "";
+        if (rootBase) {
+          const writeToolNames = new Set(["write_file", "patch_file"]);
+          for (const tc of parsed.jsonToolCalls) {
+            if (!writeToolNames.has(tc.tool || tc.name || "")) continue;
+            const cur = tc.path || tc.args?.path || tc.input?.path || "";
+            if (!cur || cur.startsWith(state.rootDir)) continue;
+            const segs = cur.split("/");
+            const idx = segs.lastIndexOf(rootBase);
+            if (idx >= 0 && idx < segs.length - 1) {
+              const repaired = state.rootDir + "/" + segs.slice(idx + 1).join("/");
+              log(colors.yellow(`  [Protocol] ${state.label}: repaired garbled path "${cur}" -> "${repaired}"`));
+              if (tc.path !== undefined) tc.path = repaired;
+              if (tc.args?.path !== undefined) tc.args.path = repaired;
+              if (tc.input?.path !== undefined) tc.input.path = repaired;
+            }
+          }
+        }
+      }
+
       // ── Placeholder-path detection (BEFORE executeStep) ─────────────────────
       // If the model uses a wrong/placeholder path (e.g. /abs/path, your-file.jsx,
       // relative paths, or any path outside the project root), intercept and correct.
