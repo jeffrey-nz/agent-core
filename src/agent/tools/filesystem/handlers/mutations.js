@@ -32,7 +32,26 @@ function isJunkRootFile(filePath, rootDir, allowedDirs) {
   return false;
 }
 
+// Restore markdown-bold-corrupted path segments: ChatGPT's markdown serializer
+// renders "__tests__" (a common JS convention: __tests__, __mocks__,
+// __snapshots__) as bold and emits it back as "**tests**". A path segment
+// "**word**" with literal asterisks is never a real path — restore it to the
+// "__word__" the model intended. Safe because "**" never legitimately appears
+// in a filesystem path.
+function restoreDunderPath(p) {
+  if (typeof p !== "string" || !p.includes("**")) return p;
+  return p.replace(/\*\*([A-Za-z0-9_]+)\*\*/g, "__$1__");
+}
+
+// Normalize input.path (and move_file's destination) in place before use.
+function normalizeInputPaths(input) {
+  if (input && typeof input.path === "string") input.path = restoreDunderPath(input.path);
+  if (input && typeof input.destination === "string") input.destination = restoreDunderPath(input.destination);
+  if (input && typeof input.to === "string") input.to = restoreDunderPath(input.to);
+}
+
 export async function handleApplyDiff(input, { rootDir, state, allowedDirs = [] }) {
+  normalizeInputPaths(input);
   // Accept 'diff' as an alias for 'diff_content' - the AI occasionally uses the
   // shorter name and we don't want a parameter-name mismatch to burn retry turns.
   const diffContent = input.diff_content ?? input.diff ?? null;
@@ -61,6 +80,7 @@ export async function handleApplyDiff(input, { rootDir, state, allowedDirs = [] 
 }
 
 export async function handleMoveFile(input, { rootDir, state, allowedDirs = [] }) {
+  normalizeInputPaths(input);
   const result = await applyUpdatesScript(rootDir, {
     files: [],
     patches: [],
@@ -84,6 +104,7 @@ export async function handleMoveFile(input, { rootDir, state, allowedDirs = [] }
 }
 
 export async function handleDeleteFile(input, { rootDir, state, allowedDirs = [] }) {
+  normalizeInputPaths(input);
   const result = await applyUpdatesScript(rootDir, {
     files: [],
     patches: [],
@@ -106,6 +127,7 @@ export async function handleDeleteFile(input, { rootDir, state, allowedDirs = []
 }
 
 export async function handleRevertFile(input, { rootDir, state }) {
+  normalizeInputPaths(input);
   const relPath = input.path;
   const absPath = path.resolve(rootDir, relPath);
 
@@ -185,6 +207,7 @@ export async function handleRevertFile(input, { rootDir, state }) {
 }
 
 export async function handlePatchFile(input, { rootDir, state, allowedDirs = [] }) {
+  normalizeInputPaths(input);
   if (
     typeof input.search_block !== "string" ||
     typeof input.replace_block !== "string"
@@ -214,6 +237,7 @@ export async function handlePatchFile(input, { rootDir, state, allowedDirs = [] 
 }
 
 export async function handleWriteFile(input, { rootDir, state, allowedDirs = [] }) {
+  normalizeInputPaths(input);
   if (typeof input.content !== "string") {
     return `[ERROR writing ${input.path || "unknown"}]\nValidation Error: write_file requires a 'content' parameter containing the file text.`;
   }
