@@ -217,6 +217,18 @@ export async function handleWriteFile(input, { rootDir, state, allowedDirs = [] 
   if (typeof input.content !== "string") {
     return `[ERROR writing ${input.path || "unknown"}]\nValidation Error: write_file requires a 'content' parameter containing the file text.`;
   }
+  // Strip a leaked "# FILE: <path>" / "// FILE: <path>" header line. The
+  // `# FILE:` headed-block format is a marker meant to be consumed by the
+  // extraction parser, but the model sometimes copies it into the literal
+  // write_file content — landing as line 1 of the saved file (harmless in
+  // Python as a comment, breaking in other languages). Strip it only when the
+  // token after FILE: is path-like so a real "# FILE: notes" comment survives.
+  {
+    const m = input.content.match(/^[ \t]*(?:#|\/\/)[ \t]*FILE:[ \t]*(\S+)[ \t]*\r?\n/);
+    if (m && (m[1].includes("/") || /\.[A-Za-z0-9]+$/.test(m[1]))) {
+      input.content = input.content.slice(m[0].length);
+    }
+  }
   // Binary content guard: reject writes that contain null bytes or dense control characters
   // (indicates the AI is trying to write binary data as text, which would corrupt the file).
   if (/\x00/.test(input.content)) {
