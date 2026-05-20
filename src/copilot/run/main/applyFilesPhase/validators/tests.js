@@ -69,9 +69,20 @@ export async function checkTests(projectDir, { phpTestFiles, jsTestFiles, rubyTe
     const nodeModulesExists = await fileExists(path.join(projectDir, "node_modules"));
     if (!nodeModulesExists) {
       log(colors.dim("  [Verifier] node_modules missing — running npm install..."));
-      const installRes = await execAsync("npm install", { cwd: projectDir });
+      const installRes = await execAsync("npm install 2>&1", { cwd: projectDir, timeout: 300000 });
       if (installRes.status !== 0) {
-        errors.push(`npm install failed:\n${installRes.stdout || installRes.stderr}`);
+        // Always surface the exit code, and combine stdout+stderr. When npm
+        // produces no output (e.g. a fast dependency-resolution failure), a
+        // bare "npm install failed:" gives the coder nothing — add a concrete
+        // hint that the cause is almost always package.json dependency versions.
+        const out = ((installRes.stdout || "") + (installRes.stderr || "")).trim();
+        errors.push(
+          `npm install failed (exit ${installRes.status}):\n` +
+          (out ||
+            "(npm produced no output — this is almost always a package.json problem: " +
+            "a dependency version that does not exist, or mutually incompatible versions / peer-dependency conflicts. " +
+            "Re-check every version in package.json dependencies and devDependencies.)"),
+        );
         return errors;
       }
       log(colors.green("  [Verifier] npm install succeeded."));
