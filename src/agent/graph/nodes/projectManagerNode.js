@@ -1280,10 +1280,22 @@ The prompt already specifies the exact file, exact line, and exact change needed
   // This runs AFTER all PM retries so it always applies to the accepted plan.
   subtasks = consolidateAtomicSubtasks(subtasks, state.projectType);
 
+  // Coerce `files` to a string[] — the AI sometimes emits object elements
+  // ({name:"x.py"} / {path:"x.py"}); path.* calls throw on non-string args.
+  const _toFileStrings = (files) => {
+    const arr = typeof files === "string" ? [files] : (Array.isArray(files) ? files : []);
+    return arr
+      .map((f) => {
+        if (typeof f === "string") return f;
+        if (f && typeof f === "object") return f.path || f.file || f.filename || f.name || "";
+        return "";
+      })
+      .filter((f) => typeof f === "string" && f.length > 0);
+  };
   subtasks = subtasks.map((s) => ({
     id: s.id,
     task: s.task,
-    files: Array.isArray(s.files) ? s.files : [],
+    files: _toFileStrings(s.files),
     lineRange: typeof s.line_range === "string" ? s.line_range : (typeof s.lineRange === "string" ? s.lineRange : ""),
     implementationNote: typeof s.implementation_note === "string" ? s.implementation_note : (typeof s.implementationNote === "string" ? s.implementationNote : ""),
     constraints: typeof s.constraints === "string" ? s.constraints : "",

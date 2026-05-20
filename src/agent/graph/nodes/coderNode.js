@@ -571,25 +571,68 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
 
   logFn(colors.dim(`  [Graph] -> Nuclear result text preview: ${nuclearText.slice(0, 250).replace(/\n/g, "↵")}`));
 
-  const ncbExtMap = { css: '.css', js: '.js', javascript: '.js', html: '.html', gd: '.gd', gdscript: '.gd', tscn: '.tscn' };
+  const ncbExtMap = {
+    css: '.css', js: '.js', javascript: '.js', html: '.html',
+    gd: '.gd', gdscript: '.gd', tscn: '.tscn',
+    python: '.py', py: '.py', go: '.go', golang: '.go',
+    ruby: '.rb', rb: '.rb', json: '.json', yaml: '.yml', yml: '.yml',
+    ts: '.ts', tsx: '.tsx', jsx: '.jsx',
+  };
   let extracted = false;
 
-  // 1. Try fenced code blocks first (```css, ```js, etc.)
-  const ncbRe = /```(\w+)\n([\s\S]*?)```/g;
+  // 0. <<<FILE: path>>> ... <<<END FILE>>> blocks. The ChatGPT nuclear prompt
+  // explicitly asks for this format, and ChatGPT complies — but the provider's
+  // structured-output parser sometimes returns 0 tool calls for it (e.g. when
+  // <<<END FILE>>> is missing). Parse the markers directly here. An optional
+  // triple-backtick fence inside the block is stripped, matching the main parser.
+  if (nuclearText.includes("<<<FILE:")) {
+    const stripFences = (s) =>
+      s.replace(/^[ \t]*```[a-zA-Z0-9_+-]*\r?\n/, "").replace(/\r?\n[ \t]*```[ \t]*\r?\n?$/, "\n");
+    // strict (with <<<END FILE>>>) then relaxed (terminated by next block / TASK_DONE / EOF)
+    const fileRe = /<<<FILE:\s*([^\n>]+?)[ \t]*>>>\r?\n([\s\S]*?)(?:<<<END FILE>>>|(?=<<<FILE:)|TASK_DONE\b|$)/g;
+    let fm;
+    while ((fm = fileRe.exec(nuclearText)) !== null) {
+      const fp = fm[1].trim();
+      if (!fp || !fp.startsWith("/")) continue;
+      const content = stripFences(fm[2].replace(/\n?<<<END FILE>>>\s*$/, "").replace(/\n?TASK_DONE\s*$/, ""));
+      if (!content.trim()) continue;
+      try {
+        await writeFile(fp, content);
+        logFn(colors.green(`  [Graph] -> Nuclear <<<FILE:>>> extraction: wrote ${content.length} chars to ${path.basename(fp)}`));
+        modifiedFiles.push(fp);
+        extracted = true;
+      } catch (_) {}
+    }
+    if (extracted) return true;
+  }
+
+  // 1. Try fenced code blocks (```python, ```js, etc.). Multiple blocks of
+  // the same extension map to DISTINCT planned files in order — earlier code used
+  // .find() which overwrote the first file repeatedly.
+  const ncbUnclaimed = plannedFiles.map((f) => path.isAbsolute(f) ? f : path.join(projectDir, f));
+  const ncbRe = /```(\w*)\r?\n([\s\S]*?)```/g;
   let ncbMatch;
   while ((ncbMatch = ncbRe.exec(nuclearText)) !== null) {
-    const lang = ncbMatch[1].toLowerCase();
+    const lang = (ncbMatch[1] || "").toLowerCase();
     const code = ncbMatch[2];
     if (!code.trim() || code.length < 50) continue;
     const ext2 = ncbExtMap[lang];
     if (!ext2) continue;
-    const targetFile2 = plannedFiles.find(f => path.extname(path.isAbsolute(f) ? f : path.join(projectDir, f)).toLowerCase() === ext2);
+    const before = nuclearText.slice(Math.max(0, ncbMatch.index - 160), ncbMatch.index);
+    const head = code.split("\n").slice(0, 2).join("\n");
+    const hintSrc = before + "\n" + head;
+    // Filename hint first, then next unclaimed file of the matching extension
+    let targetFile2 = ncbUnclaimed.find((abs) => hintSrc.includes(path.basename(abs)));
+    if (!targetFile2) {
+      targetFile2 = ncbUnclaimed.find((abs) => path.extname(abs).toLowerCase() === ext2);
+    }
     if (!targetFile2) continue;
-    const absTarget2 = path.isAbsolute(targetFile2) ? targetFile2 : path.join(projectDir, targetFile2);
     try {
-      await writeFile(absTarget2, code);
-      logFn(colors.green(`  [Graph] -> Nuclear code-block extraction: wrote ${code.length} chars to ${path.basename(absTarget2)}`));
-      modifiedFiles.push(absTarget2);
+      await writeFile(targetFile2, code);
+      logFn(colors.green(`  [Graph] -> Nuclear code-block extraction: wrote ${code.length} chars to ${path.basename(targetFile2)}`));
+      modifiedFiles.push(targetFile2);
+      const i = ncbUnclaimed.indexOf(targetFile2);
+      if (i !== -1) ncbUnclaimed.splice(i, 1);
       extracted = true;
     } catch (_) {}
   }
@@ -861,7 +904,13 @@ export async function coderNode(state, config) {
   // reading existing project files (package.json etc.) before writing.
   let newProjectSection = "";
   if (state.taskType === "new_project") {
-    const firstPlannedFile = currentSubtask?.files?.[0];
+    // Coerce to a string — a subtask file can arrive as {name:"x.py"} from the AI;
+    // path.isAbsolute/path.join throw "path must be a string" on a non-string arg.
+    let firstPlannedFile = currentSubtask?.files?.[0];
+    if (firstPlannedFile && typeof firstPlannedFile === "object") {
+      firstPlannedFile = firstPlannedFile.path || firstPlannedFile.file || firstPlannedFile.filename || firstPlannedFile.name || "";
+    }
+    if (typeof firstPlannedFile !== "string") firstPlannedFile = "";
     const firstWriteTarget = firstPlannedFile
       ? (path.isAbsolute(firstPlannedFile) ? firstPlannedFile : path.join(state.projectDir, firstPlannedFile))
       : null;
@@ -1697,25 +1746,60 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         proseCodeExtracted = false; // reset for this turn (var hoisted to function scope)
         const plannedFilesForExtract = state.subtasks?.[state.currentSubtaskIndex]?.files || [];
         if (plannedFilesForExtract.length > 0 && state.projectDir) {
-          const extMap = { css: '.css', js: '.js', javascript: '.js', html: '.html', ts: '.ts', tsx: '.tsx', jsx: '.jsx' };
-          const codeBlockRe = /```(\w+)\n([\s\S]*?)```/g;
+          // Map fenced-code language → file extension. Includes python/py — without
+          // these, ChatGPT's ```python blocks for Python projects were silently
+          // dropped, leaving the verifier with "coder wrote no files".
+          const extMap = {
+            css: '.css', js: '.js', javascript: '.js', html: '.html',
+            ts: '.ts', tsx: '.tsx', jsx: '.jsx',
+            python: '.py', py: '.py', go: '.go', golang: '.go',
+            ruby: '.rb', rb: '.rb', json: '.json', yaml: '.yml', yml: '.yml',
+          };
+          // Collect every code block with the surrounding context (the ~160 chars
+          // before it often name the file, e.g. "Here is tokenizer.py:").
+          const codeBlockRe = /```(\w*)\r?\n([\s\S]*?)```/g;
+          const blocks = [];
           let match;
           while ((match = codeBlockRe.exec(fullText)) !== null) {
-            const lang = match[1].toLowerCase();
             const code = match[2];
-            if (!code.trim() || code.length < 100) continue;
-            const ext = extMap[lang];
-            if (!ext) continue;
-            const targetFile = plannedFilesForExtract.find(f => {
-              const abs = path.isAbsolute(f) ? f : path.join(state.projectDir, f);
-              return abs.endsWith(ext) || path.extname(abs).toLowerCase() === ext;
+            if (!code.trim() || code.length < 60) continue;
+            blocks.push({
+              lang: (match[1] || "").toLowerCase(),
+              code,
+              before: fullText.slice(Math.max(0, match.index - 160), match.index),
             });
-            if (!targetFile) continue;
-            const absTarget = path.isAbsolute(targetFile) ? targetFile : path.join(state.projectDir, targetFile);
+          }
+          // Track which planned files are still unclaimed so multiple blocks of the
+          // same extension map to DISTINCT files instead of overwriting the first.
+          const unclaimed = plannedFilesForExtract.map((f) =>
+            path.isAbsolute(f) ? f : path.join(state.projectDir, f),
+          );
+          const claim = (abs) => {
+            const i = unclaimed.indexOf(abs);
+            if (i !== -1) unclaimed.splice(i, 1);
+          };
+          for (const block of blocks) {
+            const ext = extMap[block.lang];
+            // Step 1: filename hint — a planned file named in the preceding text
+            // or in a leading "# filename" / "// filename" comment in the block.
+            const head = block.code.split("\n").slice(0, 2).join("\n");
+            const hintSrc = block.before + "\n" + head;
+            let target = unclaimed.find((abs) => hintSrc.includes(path.basename(abs)));
+            // Step 2: fall back to extension match against the next unclaimed file
+            if (!target && ext) {
+              target = unclaimed.find((abs) => path.extname(abs).toLowerCase() === ext);
+            }
+            if (!target) continue;
             try {
-              await writeFile(absTarget, code);
-              log(colors.green(`  [Graph] -> Code-block extraction: wrote ${code.length} chars to ${path.basename(absTarget)}`));
-              modifiedFiles.push(absTarget);
+              // Strip a leading "# filename" / "// filename" marker comment if present
+              const cleaned = block.code.replace(
+                new RegExp(`^\\s*(?:#|//)\\s*${path.basename(target).replace(/[.]/g, "\\.")}\\s*\\r?\\n`),
+                "",
+              );
+              await writeFile(target, cleaned);
+              log(colors.green(`  [Graph] -> Code-block extraction: wrote ${cleaned.length} chars to ${path.basename(target)}`));
+              modifiedFiles.push(target);
+              claim(target);
               proseCodeExtracted = true;
             } catch (e) { /* ignore */ }
           }

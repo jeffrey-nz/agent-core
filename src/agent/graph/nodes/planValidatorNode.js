@@ -173,18 +173,27 @@ export async function planValidatorNode(state, config) {
   }
 
   // Normalize each subtask so downstream nodes can rely on the shape:
-  // `files` must be an array (AI sometimes emits a single string), `task` must be a string.
-  revisedSubtasks = revisedSubtasks.map((s, i) => {
-    const filesNorm = Array.isArray(s.files)
-      ? s.files
-      : (typeof s.files === "string" && s.files ? [s.files] : []);
-    return {
-      ...s,
-      task: typeof s.task === "string" ? s.task : String(s.task ?? ""),
-      files: filesNorm,
-      id: s.id ?? i + 1,
-    };
-  });
+  //  - `files` must be a string[] — the AI variously emits a single string,
+  //    an array of strings, OR an array of objects like {name:"x.py"} /
+  //    {path:"x.py"}. path.join/path.isAbsolute throw "path must be a string"
+  //    on object elements, which crashes coderNode before the first turn.
+  //  - `task` must be a string.
+  const toFileStrings = (files) => {
+    const arr = typeof files === "string" ? [files] : (Array.isArray(files) ? files : []);
+    return arr
+      .map((f) => {
+        if (typeof f === "string") return f;
+        if (f && typeof f === "object") return f.path || f.file || f.filename || f.name || "";
+        return "";
+      })
+      .filter((f) => typeof f === "string" && f.length > 0);
+  };
+  revisedSubtasks = revisedSubtasks.map((s, i) => ({
+    ...s,
+    task: typeof s.task === "string" ? s.task : String(s.task ?? ""),
+    files: toFileStrings(s.files),
+    id: s.id ?? i + 1,
+  }));
 
   // Sanity check: don't accept a revised plan with far fewer subtasks (likely truncated)
   if (revisedSubtasks.length < Math.ceil(state.subtasks.length * 0.6)) {
