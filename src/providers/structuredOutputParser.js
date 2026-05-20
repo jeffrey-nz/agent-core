@@ -307,6 +307,31 @@ export class StructuredOutputParser {
       }
     }
 
+    // Strategy 8: fenced code blocks with a "# FILE: <path>" header line.
+    // This is ChatGPT's most reliable format — a standalone ```lang block always
+    // renders as a <pre>, so the markdown renderer never mangles its indentation
+    // (unlike the <<<FILE:>>> markers, which sit outside fences and let ChatGPT
+    // mix fenced/unfenced content). The first line inside the fence names the file.
+    {
+      const headerFileBlocks = [];
+      const fenceRe = /```[a-zA-Z0-9_+-]*\r?\n([\s\S]*?)```/g;
+      let fm;
+      while ((fm = fenceRe.exec(text)) !== null) {
+        const body = fm[1];
+        // First non-empty line must be a FILE header: "# FILE: /path" or "// FILE: /path"
+        const headerMatch = body.match(/^[ \t]*(?:#|\/\/)[ \t]*FILE:[ \t]*(\S+)[ \t]*\r?\n([\s\S]*)$/);
+        if (!headerMatch) continue;
+        const fp = headerMatch[1].trim();
+        const content = headerMatch[2];
+        if (!fp || !fp.startsWith("/") || fp === "...") continue;
+        if (!content.trim()) continue;
+        headerFileBlocks.push({ tool: "write_file", path: fp, content });
+      }
+      if (headerFileBlocks.length > 0) {
+        return { success: true, actions: headerFileBlocks, error: null };
+      }
+    }
+
     return { success: false, actions: [], error: "No valid tool call array found" };
   }
 }

@@ -606,6 +606,26 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
     if (extracted) return true;
   }
 
+  // 0b. Fenced code blocks with a "# FILE: <path>" header line — ChatGPT's
+  // native nuclear format. The whole file lives inside one ``` block, so
+  // indentation is verbatim; the header names the absolute path.
+  {
+    const hdrRe = /```[a-zA-Z0-9_+-]*\r?\n[ \t]*(?:#|\/\/)[ \t]*FILE:[ \t]*(\S+)[ \t]*\r?\n([\s\S]*?)```/g;
+    let hm;
+    while ((hm = hdrRe.exec(nuclearText)) !== null) {
+      const fp = hm[1].trim();
+      const content = hm[2];
+      if (!fp || !fp.startsWith("/") || !content.trim()) continue;
+      try {
+        await writeFile(fp, content);
+        logFn(colors.green(`  [Graph] -> Nuclear # FILE: extraction: wrote ${content.length} chars to ${path.basename(fp)}`));
+        modifiedFiles.push(fp);
+        extracted = true;
+      } catch (_) {}
+    }
+    if (extracted) return true;
+  }
+
   // 1. Try fenced code blocks (```python, ```js, etc.). Multiple blocks of
   // the same extension map to DISTINCT planned files in order — earlier code used
   // .find() which overwrote the first file repeatedly.
@@ -919,7 +939,11 @@ export async function coderNode(state, config) {
     // Skip firstWriteHint for DeepSeek — the nuclear few-shot already guides format.
     const isDeepSeek = state.provider?.providerName === "deepseek";
     const firstWriteHint = firstWriteTarget && !isDeepSeek
-      ? useFileBlockFormat
+      ? isChatGPT
+        ? `\n⚡ FIRST ACTION: Start immediately with the first file as a code block:\n` +
+          "```\n# FILE: " + firstWriteTarget + "\n(complete file content here)\n```\n" +
+          `Do NOT wait — output the code block right away.\n`
+        : isCopilot
         ? `\n⚡ FIRST ACTION: Start immediately with the first file using <<<FILE:>>> format:\n` +
           `<<<FILE: ${firstWriteTarget}>>>\n// complete file content here\n<<<END FILE>>>\n` +
           `Do NOT wait — output the file content right away.\n`
@@ -972,7 +996,13 @@ export async function coderNode(state, config) {
         `App.tsx passes onSquareClick={handleSquareClick} to ChessBoard.\n`
       : "";
 
-    newProjectSection = useFileBlockFormat
+    newProjectSection = isChatGPT
+      ? `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
+        `- Every file in this subtask must be CREATED as a markdown code block with a "# FILE: <path>" first line.\n` +
+        `- Do NOT output prose descriptions — output the code blocks directly, one per file.\n` +
+        `- After writing all files, output: TASK_DONE\n` +
+        gameHookGuidance + firstWriteHint + injectedConfigs
+      : useFileBlockFormat
       ? `\n⚠️ NEW PROJECT MODE — You are building a brand-new application from scratch.\n` +
         `- Every file in this subtask must be CREATED using the <<<FILE: path>>> format below.\n` +
         `- Do NOT output prose descriptions — output actual file content using <<<FILE:>>> blocks.\n` +
@@ -1294,7 +1324,22 @@ Do NOT repeat an approach that has already failed - choose a different strategy 
     log(colors.dim(`  [Memory] Skipped memory injection: ${memErr.message}`));
   }
 
-  const fileOutputInstructions = useFileBlockFormat
+  const fileOutputInstructions = isChatGPT
+    ? `Instructions:
+- [FILE FORMAT] Output each file as a SINGLE standard markdown code block. The FIRST line inside the block MUST be a comment naming the file:
+  \`\`\`python
+  # FILE: ${state.projectDir}/example.py
+  (complete file content goes here)
+  \`\`\`
+- [WHY THIS FORMAT] A standard fenced code block is rendered as a verbatim <pre> block, so every space of indentation and every blank line is preserved exactly. This is the ONLY format that survives the chat UI without corruption.
+- [ONE BLOCK PER FILE] Each file is exactly ONE code block. Do NOT split a file across multiple blocks. Do NOT write any code outside a code block. Do NOT write a prose explanation before or between the blocks — output the code blocks directly.
+- [HEADER LINE] The "# FILE: <path>" line is a marker that is stripped before the file is saved; everything after it is the exact file content. For languages without # comments use "// FILE: <path>".
+- [BATCH] Write ALL files for this subtask, one code block each. After the last block, output: TASK_DONE
+- Use ABSOLUTE paths starting with ${state.projectDir}.
+- Do NOT output JSON arrays. Do NOT use <<<FILE:>>> markers. Just standard \`\`\` code blocks with a "# FILE:" first line.
+${diagnosticsInstruction}- Do not deviate from the current subtask.
+- EXISTING FILES: to modify an existing file, output its complete new content as a code block — include ALL existing functionality, never truncate.`
+    : isCopilot
     ? `Instructions:
 - [REASONING] Think through what files you need to write, then output each file using the <<<FILE:>>> format below.
 - [FILE FORMAT] To create or modify a file, use this EXACT format (NO JSON, NO tool calls):
@@ -1338,7 +1383,9 @@ ${buildAcceptanceTestDirective(state.projectType)}
   // the LAST thing the model sees. Empirically, ChatGPT skips the action when the
   // task is buried in the middle of a long system prompt; this reminder doubles
   // the action-recall rate.
-  const copilotFinalReminder = useFileBlockFormat
+  const copilotFinalReminder = isChatGPT
+    ? `\n[ACTION — WRITE THESE FILES NOW]\nTask: ${currentTask.slice(0, 400)}${subtaskFilesNote}\nOutput each file as a code block whose first line is "# FILE: /abs/path", then TASK_DONE.\n`
+    : useFileBlockFormat
     ? `\n[ACTION — WRITE THESE FILES NOW]\nTask: ${currentTask.slice(0, 400)}${subtaskFilesNote}\nOutput each file using <<<FILE: /abs/path>>> ... <<<END FILE>>> then TASK_DONE.\n`
     : "";
 
@@ -1833,16 +1880,16 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
         if (isChatGPTNuclear && plannedFiles.length > 0 && state.projectDir) {
           // ChatGPT-specific nuclear retry. The default nuclear branch instructs
           // the model to output JSON tool calls, but ChatGPT renders multi-line
-          // JSON through its markdown pipeline and the content field arrives
-          // with mangled escaping/paragraph breaks. The <<<FILE:>>> format
-          // sidesteps that entirely — it's already the format that works for
-          // the normal coder turn.
+          // JSON through its markdown pipeline and the content arrives mangled.
+          // A standard fenced code block with a "# FILE:" header is ChatGPT's
+          // native format — it always renders as a verbatim <pre>, so indentation
+          // survives intact.
           const firstFile = plannedFiles[0];
           const absFirstFile = path.isAbsolute(firstFile) ? firstFile : path.join(state.projectDir, firstFile);
           const ext = path.extname(firstFile).toLowerCase().replace(".", "") || "txt";
           const implNote = state.subtasks?.[state.currentSubtaskIndex]?.implementationNote || "";
           const shortTask = (implNote || bareTask).slice(0, 400).replace(/\n/g, " ");
-          log(colors.yellow(`  [Graph] -> Nuclear retry: ChatGPT — using <<<FILE:>>> format`));
+          log(colors.yellow(`  [Graph] -> Nuclear retry: ChatGPT — using # FILE: code-block format`));
           eventBus.emit("session_role_update", {
             role: "auxiliary", status: "active",
             provider: _provName,
@@ -1857,19 +1904,17 @@ ${fileOutputInstructions}${copilotFinalReminder}`;
               content: [
                 `Task: ${shortTask}`,
                 ``,
-                `Write the file using EXACTLY this format and nothing else:`,
+                `Write the file as ONE markdown code block, formatted EXACTLY like this:`,
                 ``,
-                `<<<FILE: ${absFirstFile}>>>`,
                 "```" + ext,
+                `# FILE: ${absFirstFile}`,
                 `(complete file content here — real implementation, no placeholders)`,
                 "```",
-                `<<<END FILE>>>`,
-                `TASK_DONE`,
                 ``,
                 `Critical rules:`,
-                `- Use the absolute path EXACTLY as shown above.`,
-                `- The triple-backticks make the chat UI preserve indentation — keep them.`,
-                `- Do NOT output JSON. Do NOT output prose explanation. Only the FILE block.`,
+                `- The FIRST line inside the block is "# FILE: ${absFirstFile}" — use that exact path.`,
+                `- Put the ENTIRE file inside ONE code block. No text outside the block.`,
+                `- Do NOT output JSON. Do NOT output a prose explanation. Just the code block.`,
               ].join("\n"),
             },
           ];
