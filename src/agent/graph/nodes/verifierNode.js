@@ -3747,6 +3747,8 @@ ${state.subtasks?.[state.currentSubtaskIndex]?.task || ""}`,
   // For new_project tasks the scaffold is pre-existing, so real code starts at subtask 1 —
   // lower the threshold so errors get caught one subtask earlier.
   const subtaskIndex = state.currentSubtaskIndex ?? 0;
+  // CRA (react-scripts) builds take 60+ s each — only run from halfway through.
+  // Vite/tsc builds are faster so they start earlier (subtask 1 for new projects).
   const buildGateThreshold = state.taskType === "new_project" ? 1 : 3;
   if (state.projectDir && subtaskIndex >= buildGateThreshold) {
     try {
@@ -3781,7 +3783,9 @@ ${state.subtasks?.[state.currentSubtaskIndex]?.task || ""}`,
       if (pkgRaw) {
         const pkg = JSON.parse(pkgRaw);
         const buildScript = pkg.scripts?.build || "";
-        const isTsOrViteBuild = /\btsc\b|\bvite build\b/.test(buildScript);
+        // Also matches react-scripts build (CRA) — catches module-resolution errors
+        // that webpack reports but tsc/vite checks miss.
+        const isTsOrViteBuild = /\btsc\b|\bvite build\b|\breact-scripts build\b/.test(buildScript);
 
         // Detect corrupted package.json: vite.config.ts present but no build script.
         // This happens when the coder repeatedly rewrites package.json and loses the scripts section.
@@ -3819,7 +3823,17 @@ ${state.subtasks?.[state.currentSubtaskIndex]?.task || ""}`,
           log(colors.dim("  [Verifier] Skipping build gate — Vite entry point (index.html) not yet present"));
         }
 
-        if (isTsOrViteBuild && viteEntryExists) {
+        // CRA builds take 60+ s — skip until halfway through the subtask list
+        // to avoid adding 5+ minutes of wall time on early scaffolding subtasks.
+        const isCraBuild = /\breact-scripts build\b/.test(buildScript);
+        const totalSubtasks = state.subtasks?.length ?? 1;
+        const craBuildThreshold = Math.max(buildGateThreshold, Math.floor(totalSubtasks / 2));
+        const skipCraTooEarly = isCraBuild && subtaskIndex < craBuildThreshold;
+        if (skipCraTooEarly) {
+          log(colors.dim(`  [Verifier] Deferring CRA build gate — subtask ${subtaskIndex + 1}/${totalSubtasks} (threshold ${craBuildThreshold + 1})`));
+        }
+
+        if (isTsOrViteBuild && viteEntryExists && !skipCraTooEarly) {
           log(colors.dim("  [Verifier] Running npm run build to verify no compile/bundle errors..."));
           const buildResult = await execAsync("npm run build 2>&1", {
             cwd: state.projectDir,
