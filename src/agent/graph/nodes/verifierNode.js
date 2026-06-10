@@ -3807,7 +3807,19 @@ ${state.subtasks?.[state.currentSubtaskIndex]?.task || ""}`,
           };
         }
 
-        if (isTsOrViteBuild) {
+        // For Vite projects: skip the build if the entry point (root index.html) doesn't
+        // exist yet. Early subtasks may scaffold package.json before creating index.html,
+        // causing "Could not resolve entry module" failures that aren't the coder's fault.
+        const isViteBuild = /\bvite build\b/.test(buildScript);
+        const viteEntryExists = !isViteBuild || await fs.promises
+          .access(path.join(state.projectDir, "index.html"))
+          .then(() => true)
+          .catch(() => false);
+        if (!viteEntryExists) {
+          log(colors.dim("  [Verifier] Skipping build gate — Vite entry point (index.html) not yet present"));
+        }
+
+        if (isTsOrViteBuild && viteEntryExists) {
           log(colors.dim("  [Verifier] Running npm run build to verify no compile/bundle errors..."));
           const buildResult = await execAsync("npm run build 2>&1", {
             cwd: state.projectDir,
