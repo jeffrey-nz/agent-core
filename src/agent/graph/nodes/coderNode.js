@@ -609,12 +609,22 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
   // 0b. Fenced code blocks with a "# FILE: <path>" header line — ChatGPT's
   // native nuclear format. The whole file lives inside one ``` block, so
   // indentation is verbatim; the header names the absolute path.
+  //
+  // Two variants handled:
+  //   (a) Closed fence:  ```lang\n# FILE: path\ncontent\n```
+  //   (b) Unclosed fence: ```lang\n# FILE: path\ncontent (no closing ```)
+  //       — ChatGPT's Copy button sometimes omits the trailing fence.
+  //
+  // Also handles bare (no-fence) # FILE: headers, which occur when the bridge
+  // falls back from the Copy-button path to the DOM innerText path (which strips
+  // the backtick fence markers from <pre> blocks).
   {
-    const hdrRe = /```[a-zA-Z0-9_+-]*\r?\n[ \t]*(?:#|\/\/)[ \t]*FILE:[ \t]*(\S+)[ \t]*\r?\n([\s\S]*?)```/g;
+    // (a) + (b): fenced, with or without closing ```
+    const hdrRe = /```[a-zA-Z0-9_+-]*\r?\n[^\S\n]*(?:#|\/\/)[^\S\n]*FILE:[^\S\n]*(\S+)[^\S\n]*\r?\n([\s\S]*?)(?:```|$)/g;
     let hm;
     while ((hm = hdrRe.exec(nuclearText)) !== null) {
       const fp = hm[1].trim();
-      const content = hm[2];
+      const content = hm[2].replace(/```\s*$/, ""); // strip a trailing fence if present
       if (!fp || !fp.startsWith("/") || !content.trim()) continue;
       try {
         await writeFile(fp, content);
@@ -624,6 +634,27 @@ async function tryNuclearExtract(nuclearText, plannedFiles, projectDir, modified
       } catch (_) {}
     }
     if (extracted) return true;
+
+    // (c) Bare # FILE: headers without any fences (DOM-walk extraction strips fences).
+    // Split on header lines, then slice content between consecutive headers.
+    {
+      const hdrLineRe = /^[^\S\n]*(?:#|\/\/)[^\S\n]*FILE:[^\S\n]*(\S+)[^\S\n]*$/gm;
+      const headers = [...nuclearText.matchAll(hdrLineRe)];
+      for (let i = 0; i < headers.length; i++) {
+        const fp = headers[i][1].trim();
+        const contentStart = headers[i].index + headers[i][0].length + 1;
+        const contentEnd = i + 1 < headers.length ? headers[i + 1].index : nuclearText.length;
+        const content = nuclearText.slice(contentStart, contentEnd);
+        if (!fp || !fp.startsWith("/") || !content.trim()) continue;
+        try {
+          await writeFile(fp, content);
+          logFn(colors.green(`  [Graph] -> Nuclear bare-FILE extraction: wrote ${content.length} chars to ${path.basename(fp)}`));
+          modifiedFiles.push(fp);
+          extracted = true;
+        } catch (_) {}
+      }
+      if (extracted) return true;
+    }
   }
 
   // 1. Try fenced code blocks (```python, ```js, etc.). Multiple blocks of
